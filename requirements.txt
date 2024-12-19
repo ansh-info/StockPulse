@@ -1,0 +1,15 @@
+apache-beam[gcp]
+google-cloud-pubsub
+google-cloud-storage
+google-cloud-bigquery
+google-cloud-bigquery-storage
+pandas
+pandas-gbq
+requests
+schedule
+python-dotenv
+streamlit
+db-dtypes
+plotly
+numpy
+pytz
