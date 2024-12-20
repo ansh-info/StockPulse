@@ -11,42 +11,35 @@ from config import GCP_CONFIG, STOCK_CONFIGS
 
 class BigQueryLoader:
     def __init__(self):
+        # Initialize clients
         self.client = bigquery.Client()
         self.preprocessor = StockDataPreprocessor()
+
+        # Initialize table references
         self.raw_tables = {}
         self.processed_tables = {}
-        self.batch_size = 100  # Number of records to batch before loading
-        self.batch_timeout = 60  # Seconds to wait before loading a non-full batch
+
+        # Initialize batch processing attributes
+        self.batch_size = 100
+        self.batch_timeout = 60
         self.batch_data = defaultdict(list)
         self.last_load_time = defaultdict(float)
 
-        # Ensure dataset exists before creating tables
+        # Setup infrastructure
         self.setup_dataset()
         self.setup_tables()
 
     def setup_dataset(self):
         """Create the dataset if it doesn't exist"""
+        dataset_id = f"{GCP_CONFIG['PROJECT_ID']}.{GCP_CONFIG['DATASET_NAME']}"
         try:
-            dataset_id = f"{GCP_CONFIG['PROJECT_ID']}.{GCP_CONFIG['DATASET_NAME']}"
-            try:
-                self.client.get_dataset(dataset_id)
-                print(f"Dataset {dataset_id} already exists")
-            except Exception:
-                # Construct a full dataset object
-                dataset = bigquery.Dataset(dataset_id)
-
-                # Specify dataset location
-                dataset.location = (
-                    "US"  # You can change this to your preferred location
-                )
-
-                # Create the dataset
-                dataset = self.client.create_dataset(dataset, exists_ok=True)
-                print(f"Created dataset {dataset_id}")
-
-        except Exception as e:
-            print(f"Error setting up dataset: {e}")
-            raise
+            dataset = self.client.get_dataset(dataset_id)
+            print(f"Dataset {dataset_id} already exists")
+        except Exception:
+            dataset = bigquery.Dataset(dataset_id)
+            dataset.location = "US"
+            dataset = self.client.create_dataset(dataset, exists_ok=True)
+            print(f"Created dataset {dataset_id}")
 
     def setup_tables(self):
         """Create both raw and processed tables for all configured stocks"""
@@ -74,30 +67,60 @@ class BigQueryLoader:
         ]
 
         for symbol, config in STOCK_CONFIGS.items():
-            # Setup raw data table
-            raw_table_ref = f"{dataset_ref}.{config['table_name']}_raw"
-            raw_table = bigquery.Table(raw_table_ref, schema=raw_schema)
-            self.raw_tables[symbol] = self.client.create_table(
-                raw_table, exists_ok=True
-            )
+            try:
+                # Setup raw data table
+                raw_table_ref = f"{dataset_ref}.{config['table_name']}_raw"
+                raw_table = bigquery.Table(raw_table_ref, schema=raw_schema)
+                self.raw_tables[symbol] = self.client.create_table(
+                    raw_table, exists_ok=True
+                )
 
-            # Setup processed data table
-            processed_table_ref = f"{dataset_ref}.{config['table_name']}_processed"
-            processed_table = bigquery.Table(
-                processed_table_ref, schema=processed_schema
-            )
-            self.processed_tables[symbol] = self.client.create_table(
-                processed_table, exists_ok=True
-            )
+                # Setup processed data table
+                processed_table_ref = f"{dataset_ref}.{config['table_name']}_processed"
+                processed_table = bigquery.Table(
+                    processed_table_ref, schema=processed_schema
+                )
+                self.processed_tables[symbol] = self.client.create_table(
+                    processed_table, exists_ok=True
+                )
 
-            print(f"Ensured tables exist for {symbol}")
+                print(f"Ensured tables exist for {symbol}")
+            except Exception as e:
+                print(f"Error setting up tables for {symbol}: {e}")
 
-    def load_batch(self, symbol: str):
+    def add_to_batch(self, symbol: str, data: dict):
+        """Add a record to the batch"""
+        self.batch_data[symbol].append(
+            {
+                "timestamp": data["timestamp"],
+                "symbol": symbol,
+                "open": float(data["open"]),
+                "high": float(data["high"]),
+                "low": float(data["low"]),
+                "close": float(data["close"]),
+                "volume": int(data["volume"]),
+            }
+        )
+
+    def should_load_batch(self, symbol: str) -> bool:
+        """Check if batch should be loaded"""
+        if not self.batch_data[symbol]:
+            return False
+
+        current_time = time.time()
+        timeout_reached = (
+            current_time - self.last_load_time[symbol]
+        ) > self.batch_timeout
+        batch_full = len(self.batch_data[symbol]) >= self.batch_size
+
+        return timeout_reached or batch_full
+
+    def load_batch(self, symbol: str) -> bool:
         """Load a batch of records for a specific symbol"""
-        try:
-            if not self.batch_data[symbol]:
-                return True
+        if not self.batch_data[symbol]:
+            return True
 
+        try:
             # Convert batch to DataFrame
             raw_df = pd.DataFrame(self.batch_data[symbol])
             raw_df["timestamp"] = pd.to_datetime(raw_df["timestamp"])
@@ -114,13 +137,18 @@ class BigQueryLoader:
 
             # Load raw data
             raw_table_id = f"{GCP_CONFIG['PROJECT_ID']}.{GCP_CONFIG['DATASET_NAME']}.{STOCK_CONFIGS[symbol]['table_name']}_raw"
-            job_raw = self.client.load_table_from_dataframe(raw_df, raw_table_id)
+            job_config = bigquery.LoadJobConfig(
+                write_disposition=bigquery.WriteDisposition.WRITE_APPEND
+            )
+            job_raw = self.client.load_table_from_dataframe(
+                raw_df, raw_table_id, job_config=job_config
+            )
             job_raw.result()
 
             # Load processed data
             processed_table_id = f"{GCP_CONFIG['PROJECT_ID']}.{GCP_CONFIG['DATASET_NAME']}.{STOCK_CONFIGS[symbol]['table_name']}_processed"
             job_processed = self.client.load_table_from_dataframe(
-                processed_df, processed_table_id
+                processed_df, processed_table_id, job_config=job_config
             )
             job_processed.result()
 
@@ -135,30 +163,12 @@ class BigQueryLoader:
             print(f"Error loading batch for {symbol}: {e}")
             return False
 
-    def process_and_load_data(self, data: dict, symbol: str):
-        """Add data to batch and load if batch is full or timeout reached"""
+    def process_and_load_data(self, data: dict, symbol: str) -> bool:
+        """Process and potentially load data"""
         try:
-            # Add record to batch
-            self.batch_data[symbol].append(
-                {
-                    "timestamp": data["timestamp"],
-                    "symbol": symbol,
-                    "open": float(data["open"]),
-                    "high": float(data["high"]),
-                    "low": float(data["low"]),
-                    "close": float(data["close"]),
-                    "volume": int(data["volume"]),
-                }
-            )
+            self.add_to_batch(symbol, data)
 
-            # Check if we should load the batch
-            current_time = time.time()
-            timeout_reached = (
-                current_time - self.last_load_time[symbol]
-            ) > self.batch_timeout
-            batch_full = len(self.batch_data[symbol]) >= self.batch_size
-
-            if batch_full or timeout_reached:
+            if self.should_load_batch(symbol):
                 return self.load_batch(symbol)
             return True
 
@@ -188,35 +198,35 @@ class BigQueryLoader:
 
         except Exception as e:
             print(f"Error in callback: {e}")
+            import traceback
+
+            print(traceback.format_exc())
             message.nack()
 
     def cleanup(self):
         """Load any remaining batches before shutting down"""
-        for symbol in self.batch_data.keys():
+        print("Running cleanup...")
+        for symbol in list(self.batch_data.keys()):
             if self.batch_data[symbol]:
                 self.load_batch(symbol)
 
 
 def main():
+    loader = BigQueryLoader()
+    subscriber = pubsub_v1.SubscriberClient()
+    subscription_path = subscriber.subscription_path(
+        GCP_CONFIG["PROJECT_ID"], "stock-data-sub"
+    )
+
+    streaming_pull_future = subscriber.subscribe(subscription_path, loader.callback)
+    print(f"Starting to listen for messages on {subscription_path}")
+
     try:
-        loader = BigQueryLoader()
-        subscriber = pubsub_v1.SubscriberClient()
-        subscription_path = subscriber.subscription_path(
-            GCP_CONFIG["PROJECT_ID"], "stock-data-sub"
-        )
-
-        streaming_pull_future = subscriber.subscribe(subscription_path, loader.callback)
-        print(f"Starting to listen for messages on {subscription_path}")
-
-        try:
-            streaming_pull_future.result()
-        except KeyboardInterrupt:
-            streaming_pull_future.cancel()
-            loader.cleanup()  # Load any remaining batches
-            print("Stopped listening for messages")
-    except Exception as e:
-        print(f"Error initializing BigQuery Loader: {e}")
-        raise
+        streaming_pull_future.result()
+    except KeyboardInterrupt:
+        streaming_pull_future.cancel()
+        loader.cleanup()
+        print("Stopped listening for messages")
 
 
 if __name__ == "__main__":
