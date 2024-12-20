@@ -13,11 +13,14 @@ services:
     image: python:3.9-slim
     container_name: python
     volumes:
-      - ./src:/workspace
+      - ./src:/workspace/src
+      - ./app:/workspace/app
       - ./requirements.txt:/workspace/requirements.txt
       - ./keys:/workspace/keys
     working_dir: /workspace
     tty: true
     environment:
       - GOOGLE_APPLICATION_CREDENTIALS=/workspace/keys/key.json
+    ports:
+      - "8501:8501" # Add this line to expose Streamlit port
     command: /bin/bash
