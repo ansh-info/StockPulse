@@ -1,6 +1,7 @@
 import json
 import time
 from collections import defaultdict
+from datetime import datetime
 
 import pandas as pd
 from google.cloud import bigquery, pubsub_v1
@@ -11,6 +12,7 @@ from config import GCP_CONFIG, STOCK_CONFIGS
 
 class BigQueryLoader:
     def __init__(self):
+        print("Initializing BigQuery Loader...")
         # Initialize clients
         self.client = bigquery.Client()
         self.preprocessor = StockDataPreprocessor()
@@ -26,8 +28,10 @@ class BigQueryLoader:
         self.last_load_time = defaultdict(float)
 
         # Setup infrastructure
+        print("Setting up BigQuery infrastructure...")
         self.setup_dataset()
         self.setup_tables()
+        print("Infrastructure setup complete.")
 
     def setup_dataset(self):
         """Create the dataset if it doesn't exist"""
@@ -36,6 +40,7 @@ class BigQueryLoader:
             dataset = self.client.get_dataset(dataset_id)
             print(f"Dataset {dataset_id} already exists")
         except Exception:
+            print(f"Creating dataset {dataset_id}...")
             dataset = bigquery.Dataset(dataset_id)
             dataset.location = "US"
             dataset = self.client.create_dataset(dataset, exists_ok=True)
@@ -43,6 +48,7 @@ class BigQueryLoader:
 
     def setup_tables(self):
         """Create both raw and processed tables for all configured stocks"""
+        print("Setting up tables...")
         dataset_ref = f"{GCP_CONFIG['PROJECT_ID']}.{GCP_CONFIG['DATASET_NAME']}"
 
         # Schema for raw data
@@ -68,6 +74,7 @@ class BigQueryLoader:
 
         for symbol, config in STOCK_CONFIGS.items():
             try:
+                print(f"Setting up tables for {symbol}...")
                 # Setup raw data table
                 raw_table_ref = f"{dataset_ref}.{config['table_name']}_raw"
                 raw_table = bigquery.Table(raw_table_ref, schema=raw_schema)
@@ -84,15 +91,20 @@ class BigQueryLoader:
                     processed_table, exists_ok=True
                 )
 
-                print(f"Ensured tables exist for {symbol}")
+                print(f"Successfully set up tables for {symbol}")
             except Exception as e:
                 print(f"Error setting up tables for {symbol}: {e}")
 
     def add_to_batch(self, symbol: str, data: dict):
         """Add a record to the batch"""
-        self.batch_data[symbol].append(
-            {
-                "timestamp": data["timestamp"],
+        try:
+            # Use existing timestamp or create new one
+            timestamp = data.get(
+                "timestamp", datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            )
+
+            record = {
+                "timestamp": timestamp,
                 "symbol": symbol,
                 "open": float(data["open"]),
                 "high": float(data["high"]),
@@ -100,7 +112,13 @@ class BigQueryLoader:
                 "close": float(data["close"]),
                 "volume": int(data["volume"]),
             }
-        )
+
+            self.batch_data[symbol].append(record)
+            print(f"Added record to batch for {symbol} at {record['timestamp']}")
+
+        except Exception as e:
+            print(f"Error adding to batch: {e}")
+            raise
 
     def should_load_batch(self, symbol: str) -> bool:
         """Check if batch should be loaded"""
@@ -212,21 +230,31 @@ class BigQueryLoader:
 
 
 def main():
-    loader = BigQueryLoader()
-    subscriber = pubsub_v1.SubscriberClient()
-    subscription_path = subscriber.subscription_path(
-        GCP_CONFIG["PROJECT_ID"], "stock-data-sub"
-    )
-
-    streaming_pull_future = subscriber.subscribe(subscription_path, loader.callback)
-    print(f"Starting to listen for messages on {subscription_path}")
-
     try:
-        streaming_pull_future.result()
-    except KeyboardInterrupt:
-        streaming_pull_future.cancel()
-        loader.cleanup()
-        print("Stopped listening for messages")
+        print("Starting BigQuery Loader setup...")
+        loader = BigQueryLoader()
+        print("BigQuery Loader setup complete.")
+
+        print("Setting up Pub/Sub subscriber...")
+        subscriber = pubsub_v1.SubscriberClient()
+        subscription_path = subscriber.subscription_path(
+            GCP_CONFIG["PROJECT_ID"], "stock-data-sub"
+        )
+
+        print("Starting to listen for messages...")
+        streaming_pull_future = subscriber.subscribe(subscription_path, loader.callback)
+        print(f"Listening for messages on {subscription_path}")
+
+        try:
+            streaming_pull_future.result()
+        except KeyboardInterrupt:
+            print("\nShutting down...")
+            streaming_pull_future.cancel()
+            loader.cleanup()
+            print("Cleanup complete. Stopped listening for messages.")
+    except Exception as e:
+        print(f"Fatal error: {e}")
+        raise
 
 
 if __name__ == "__main__":
