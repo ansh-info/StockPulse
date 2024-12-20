@@ -52,12 +52,12 @@ class StockDataPreprocessor:
                 }
             )
 
-        # Fill gaps if requested
+        # Fill gaps if requested - using recommended methods
         if fill_gaps:
             # Forward fill for short gaps (within same trading day)
-            df = df.fillna(
-                method="ffill", limit=12
-            )  # limit prevents filling across days
+            df = df.ffill(limit=12)  # limit prevents filling across days
+            # For any remaining gaps, use backward fill with limit
+            df = df.bfill(limit=12)
 
         # Calculate technical indicators if requested
         if calculate_indicators:
@@ -65,14 +65,16 @@ class StockDataPreprocessor:
             df["daily_return"] = df["close"].pct_change() * 100
 
             # Moving averages
-            df["ma7"] = df["close"].rolling(window=7).mean()
-            df["ma20"] = df["close"].rolling(window=20).mean()
+            df["ma7"] = df["close"].rolling(window=7, min_periods=1).mean()
+            df["ma20"] = df["close"].rolling(window=20, min_periods=1).mean()
 
             # Volatility (20-period standard deviation)
-            df["volatility"] = df["daily_return"].rolling(window=20).std()
+            df["volatility"] = (
+                df["daily_return"].rolling(window=20, min_periods=1).std()
+            )
 
             # Trading volume indicators
-            df["volume_ma5"] = df["volume"].rolling(window=5).mean()
+            df["volume_ma5"] = df["volume"].rolling(window=5, min_periods=1).mean()
 
             # Price momentum (14-period)
             df["momentum"] = df["close"] - df["close"].shift(14)
