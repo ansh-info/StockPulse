@@ -34,10 +34,23 @@ class StockDataPipeline:
         try:
             # Ensure the record has all required fields
             if "timestamp" not in record:
-                record["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                print(f"Adding timestamp {current_time} to record")
+                record["timestamp"] = current_time
+
+            # Remove NaN fields before publishing
+            cleaned_record = {
+                "timestamp": record["timestamp"],
+                "symbol": record["symbol"],
+                "open": float(record["open"]),
+                "high": float(record["high"]),
+                "low": float(record["low"]),
+                "close": float(record["close"]),
+                "volume": int(record["volume"]),
+            }
 
             # Create message and publish
-            message = json.dumps(record).encode("utf-8")
+            message = json.dumps(cleaned_record).encode("utf-8")
             future = self.publisher.publish(self.topic_path, data=message)
             message_id = future.result()
             print(
