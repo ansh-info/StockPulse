@@ -1,3 +1,4 @@
+# dashboard.py
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -34,35 +35,24 @@ class StockDashboard:
         for symbol, config in STOCK_CONFIGS.items():
             stock_queries.append(
                 f"""
-            WITH daily_stats AS (
-                SELECT
-                    DATE(timestamp) as date,
-                    '{symbol}' as symbol,
-                    FIRST_VALUE(open) OVER (PARTITION BY DATE(timestamp) ORDER BY timestamp ASC) as day_open,
-                    MAX(high) as day_high,
-                    MIN(low) as day_low,
-                    LAST_VALUE(close) OVER (PARTITION BY DATE(timestamp) ORDER BY timestamp ASC) as day_close,
-                    SUM(volume) as total_volume
-                FROM {self.dataset}.{config['table_name']}
-                WHERE DATE(timestamp) >= DATE_SUB(CURRENT_DATE(), INTERVAL {days} DAY)
-                GROUP BY DATE(timestamp), symbol, timestamp, open, close
-            )
-            SELECT 
-                date,
-                symbol,
-                ANY_VALUE(day_open) as day_open,
-                ANY_VALUE(day_high) as day_high,
-                ANY_VALUE(day_low) as day_low,
-                ANY_VALUE(day_close) as day_close,
-                ANY_VALUE(total_volume) as total_volume,
-                ((ANY_VALUE(day_close) - ANY_VALUE(day_open)) / ANY_VALUE(day_open) * 100) as daily_return
-            FROM daily_stats
-            GROUP BY date, symbol
+            SELECT
+                DATE(timestamp) as date,
+                '{symbol}' as symbol,
+                MIN(open) as day_open,
+                MAX(high) as day_high,
+                MIN(low) as day_low,
+                MAX(CASE WHEN timestamp = MAX(timestamp) THEN close END) as day_close,
+                SUM(volume) as total_volume,
+                ((MAX(CASE WHEN timestamp = MAX(timestamp) THEN close END) - MIN(open)) / MIN(open) * 100) as daily_return
+            FROM {self.dataset}.{config['table_name']}
+            WHERE DATE(timestamp) >= DATE_SUB(CURRENT_DATE(), INTERVAL {days} DAY)
+            GROUP BY DATE(timestamp)
             """
             )
 
         query = f"""
-        {" UNION ALL ".join(stock_queries)}
+        SELECT *
+        FROM ({" UNION ALL ".join(stock_queries)})
         ORDER BY date DESC, symbol
         """
         return pd.read_gbq(query, project_id=GCP_CONFIG["PROJECT_ID"])
