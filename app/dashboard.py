@@ -1,6 +1,4 @@
 # dashboard.py
-from datetime import datetime, timedelta
-
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -32,19 +30,30 @@ class StockDashboard:
         return pd.read_gbq(query, project_id=GCP_CONFIG["PROJECT_ID"])
 
     def get_daily_summary(self, days=30):
-        query = f"""
-        SELECT *
-        FROM {self.dataset}.daily_summary
-        WHERE date >= DATE_SUB(CURRENT_DATE(), INTERVAL {days} DAY)
-        ORDER BY date, symbol
-        """
-        return pd.read_gbq(query, project_id=GCP_CONFIG["PROJECT_ID"])
+        """Get daily summary for all stocks directly from raw tables"""
+        stock_queries = []
+        for symbol, config in STOCK_CONFIGS.items():
+            stock_queries.append(
+                f"""
+            SELECT
+                DATE(timestamp) as date,
+                '{symbol}' as symbol,
+                FIRST_VALUE(open) OVER (PARTITION BY DATE(timestamp) ORDER BY timestamp) as day_open,
+                MAX(high) as day_high,
+                MIN(low) as day_low,
+                LAST_VALUE(close) OVER (PARTITION BY DATE(timestamp) ORDER BY timestamp) as day_close,
+                SUM(volume) as total_volume,
+                (LAST_VALUE(close) OVER (PARTITION BY DATE(timestamp) ORDER BY timestamp) - 
+                 FIRST_VALUE(open) OVER (PARTITION BY DATE(timestamp) ORDER BY timestamp)) / 
+                 FIRST_VALUE(open) OVER (PARTITION BY DATE(timestamp) ORDER BY timestamp) * 100 as daily_return
+            FROM {self.dataset}.{config['table_name']}
+            WHERE DATE(timestamp) >= DATE_SUB(CURRENT_DATE(), INTERVAL {days} DAY)
+            """
+            )
 
-    def get_correlations(self):
         query = f"""
-        SELECT *
-        FROM {self.dataset}.stock_correlations
-        ORDER BY ABS(return_correlation) DESC
+        {" UNION ALL ".join(stock_queries)}
+        ORDER BY date DESC, symbol
         """
         return pd.read_gbq(query, project_id=GCP_CONFIG["PROJECT_ID"])
 
@@ -128,42 +137,25 @@ def main():
     )
     st.plotly_chart(fig_volume, use_container_width=True)
 
-    # Correlation Matrix
-    st.header("Stock Correlations")
-    correlations = dashboard.get_correlations()
-
-    # Create correlation matrix visualization
-    corr_fig = px.scatter(
-        correlations,
-        x="stock1",
-        y="stock2",
-        size="return_correlation",
-        color="return_correlation",
-        title="Stock Return Correlations",
-        color_continuous_scale="RdBu",
-    )
-
-    st.plotly_chart(corr_fig, use_container_width=True)
-
     # Performance Comparison
     st.header("Performance Comparison")
-    # Normalize prices to compare relative performance
     comparison_df = pd.DataFrame()
 
     for symbol in STOCK_CONFIGS.keys():
         stock_data = dashboard.get_stock_data(symbol, selected_days)
-        first_price = stock_data["close"].iloc[0]
-        comparison_df[symbol] = (stock_data["close"] / first_price - 1) * 100
-        comparison_df["timestamp"] = stock_data["timestamp"]
+        if not stock_data.empty:
+            first_price = stock_data["close"].iloc[0]
+            comparison_df[symbol] = (stock_data["close"] / first_price - 1) * 100
+            comparison_df["timestamp"] = stock_data["timestamp"]
 
-    fig_comparison = px.line(
-        comparison_df,
-        x="timestamp",
-        y=list(STOCK_CONFIGS.keys()),
-        title="Relative Performance Comparison (%)",
-    )
-
-    st.plotly_chart(fig_comparison, use_container_width=True)
+    if not comparison_df.empty:
+        fig_comparison = px.line(
+            comparison_df,
+            x="timestamp",
+            y=[col for col in comparison_df.columns if col != "timestamp"],
+            title="Relative Performance Comparison (%)",
+        )
+        st.plotly_chart(fig_comparison, use_container_width=True)
 
 
 if __name__ == "__main__":
