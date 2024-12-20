@@ -3,6 +3,7 @@ import time
 from datetime import datetime
 
 import pandas as pd
+import requests
 from google.cloud import pubsub_v1, storage
 from preprocessing_pipeline import StockDataPreprocessor
 
@@ -18,36 +19,12 @@ class StockDataPipeline:
             GCP_CONFIG["PROJECT_ID"], GCP_CONFIG["TOPIC_NAME"]
         )
 
-    def save_to_gcs(self, data, symbol: str, timestamp: str) -> None:
-        """Save both raw and processed data to Google Cloud Storage"""
-        try:
-            bucket = self.storage_client.bucket(GCP_CONFIG["BUCKET_NAME"])
-
-            # Save raw data
-            raw_blob = bucket.blob(f"raw-data/{symbol}/{timestamp}.json")
-            raw_blob.upload_from_string(json.dumps(data))
-
-            # Save processed data
-            if isinstance(data, dict) and "Time Series (5min)" in data:
-                # Convert to DataFrame and process
-                df = pd.DataFrame.from_dict(data["Time Series (5min)"], orient="index")
-                df.index.name = "timestamp"
-                df.columns = [col.split(". ")[1] for col in df.columns]
-
-                processed_df = self.preprocessor.process_stock_data(df)
-                processed_blob = bucket.blob(
-                    f"processed-data/{symbol}/{timestamp}.json"
-                )
-                processed_blob.upload_from_string(processed_df.to_json())
-
-            print(f"Saved data to GCS: {symbol} - {timestamp}")
-
-        except Exception as e:
-            print(f"Error saving to GCS: {e}")
-
     def publish_to_pubsub(self, record: dict) -> None:
         """Publish record to Pub/Sub"""
         try:
+            # Ensure timestamp is included
+            record["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
             # Create DataFrame for preprocessing
             df = pd.DataFrame([record])
 
@@ -58,12 +35,17 @@ class StockDataPipeline:
 
             # Convert processed data back to record format
             processed_record = processed_df.iloc[0].to_dict()
+            processed_record["timestamp"] = record[
+                "timestamp"
+            ]  # Ensure timestamp is preserved
 
             # Publish processed data
             message = json.dumps(processed_record).encode("utf-8")
             future = self.publisher.publish(self.topic_path, data=message)
             message_id = future.result()
-            print(f"Published message {message_id} for {record['symbol']}")
+            print(
+                f"Published message {message_id} for {record['symbol']} at {record['timestamp']}"
+            )
 
         except Exception as e:
             print(f"Error publishing to Pub/Sub: {e}")
@@ -82,13 +64,13 @@ class StockDataPipeline:
                 time_series = data["Time Series (5min)"]
                 current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-                # Save both raw and processed data to GCS
+                # Save raw data to GCS
                 self.save_to_gcs(data, symbol, current_time)
 
                 # Process and publish each data point
                 for timestamp, values in time_series.items():
                     record = {
-                        "timestamp": timestamp,
+                        "timestamp": timestamp,  # Use the actual timestamp from the API
                         "symbol": symbol,
                         "open": float(values["1. open"]),
                         "high": float(values["2. high"]),
