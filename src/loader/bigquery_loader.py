@@ -1,4 +1,6 @@
 import json
+import time
+from collections import defaultdict
 
 import pandas as pd
 from google.cloud import bigquery, pubsub_v1
@@ -13,6 +15,10 @@ class BigQueryLoader:
         self.preprocessor = StockDataPreprocessor()
         self.raw_tables = {}
         self.processed_tables = {}
+        self.batch_size = 100  # Number of records to batch before loading
+        self.batch_timeout = 60  # Seconds to wait before loading a non-full batch
+        self.batch_data = defaultdict(list)
+        self.last_load_time = defaultdict(float)
         self.setup_tables()
 
     def setup_tables(self):
@@ -59,98 +65,91 @@ class BigQueryLoader:
 
             print(f"Ensured tables exist for {symbol}")
 
-    # bigquery_loader.py
-
-
-def process_and_load_data(self, data: dict, symbol: str):
-    """Process raw data and load both raw and processed data into BigQuery"""
-    try:
-        # Debug print
-        print("Received data:", data)
-        print("Data types:", {k: type(v) for k, v in data.items()})
-
-        # Use current timestamp if not provided
-        if "timestamp" not in data:
-            data["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            print("Added missing timestamp:", data["timestamp"])
-
+    def load_batch(self, symbol: str):
+        """Load a batch of records for a specific symbol"""
         try:
-            # Convert timestamp string to pandas timestamp
-            timestamp = pd.to_datetime(data["timestamp"])
-            print(f"Converted timestamp: {timestamp}")
+            if not self.batch_data[symbol]:
+                return True
+
+            # Convert batch to DataFrame
+            raw_df = pd.DataFrame(self.batch_data[symbol])
+            raw_df["timestamp"] = pd.to_datetime(raw_df["timestamp"])
+
+            # Process the batch
+            df_for_processing = raw_df.copy()
+            processed_df = self.preprocessor.process_stock_data(
+                df_for_processing,
+                resample_freq=None,
+                fill_gaps=True,
+                calculate_indicators=True,
+            )
+            processed_df = processed_df.reset_index()
+
+            # Load raw data
+            raw_table_id = f"{GCP_CONFIG['PROJECT_ID']}.{GCP_CONFIG['DATASET_NAME']}.{STOCK_CONFIGS[symbol]['table_name']}_raw"
+            job_raw = self.client.load_table_from_dataframe(raw_df, raw_table_id)
+            job_raw.result()
+
+            # Load processed data
+            processed_table_id = f"{GCP_CONFIG['PROJECT_ID']}.{GCP_CONFIG['DATASET_NAME']}.{STOCK_CONFIGS[symbol]['table_name']}_processed"
+            job_processed = self.client.load_table_from_dataframe(
+                processed_df, processed_table_id
+            )
+            job_processed.result()
+
+            print(
+                f"Successfully loaded batch of {len(self.batch_data[symbol])} records for {symbol}"
+            )
+            self.batch_data[symbol] = []
+            self.last_load_time[symbol] = time.time()
+            return True
+
         except Exception as e:
-            print(f"Error converting timestamp: {e}")
+            print(f"Error loading batch for {symbol}: {e}")
             return False
 
-        # Create DataFrame with explicit data types
-        raw_df = pd.DataFrame(
-            [
+    def process_and_load_data(self, data: dict, symbol: str):
+        """Add data to batch and load if batch is full or timeout reached"""
+        try:
+            # Add record to batch
+            self.batch_data[symbol].append(
                 {
-                    "timestamp": timestamp,
-                    "symbol": str(data["symbol"]),
+                    "timestamp": data["timestamp"],
+                    "symbol": symbol,
                     "open": float(data["open"]),
                     "high": float(data["high"]),
                     "low": float(data["low"]),
                     "close": float(data["close"]),
                     "volume": int(data["volume"]),
                 }
-            ]
-        )
+            )
 
-        print("Created raw DataFrame:")
-        print(raw_df.dtypes)
-        print(raw_df.head())
+            # Check if we should load the batch
+            current_time = time.time()
+            timeout_reached = (
+                current_time - self.last_load_time[symbol]
+            ) > self.batch_timeout
+            batch_full = len(self.batch_data[symbol]) >= self.batch_size
 
-        # Create a copy for processing
-        df_for_processing = raw_df.copy()
-        processed_df = self.preprocessor.process_stock_data(
-            df_for_processing,
-            resample_freq=None,
-            fill_gaps=True,
-            calculate_indicators=True,
-        )
+            if batch_full or timeout_reached:
+                return self.load_batch(symbol)
+            return True
 
-        # Reset index to make timestamp a column
-        processed_df = processed_df.reset_index()
-
-        # Load raw data
-        raw_table_id = f"{GCP_CONFIG['PROJECT_ID']}.{GCP_CONFIG['DATASET_NAME']}.{STOCK_CONFIGS[symbol]['table_name']}_raw"
-        job_raw = self.client.load_table_from_dataframe(raw_df, raw_table_id)
-        job_raw.result()
-
-        # Load processed data
-        processed_table_id = f"{GCP_CONFIG['PROJECT_ID']}.{GCP_CONFIG['DATASET_NAME']}.{STOCK_CONFIGS[symbol]['table_name']}_processed"
-        job_processed = self.client.load_table_from_dataframe(
-            processed_df, processed_table_id
-        )
-        job_processed.result()
-
-        print(f"Data loaded successfully for {symbol}")
-        return True
-
-    except Exception as e:
-        print(f"Error in process_and_load_data: {e}")
-        import traceback
-
-        print(traceback.format_exc())
-        return False
+        except Exception as e:
+            print(f"Error processing data: {e}")
+            return False
 
     def callback(self, message):
         """Handle incoming Pub/Sub messages"""
         try:
             print("\nReceived new message...")
             data = json.loads(message.data.decode("utf-8"))
-            print("Decoded message data:", data)
+            print(f"Decoded message data: {data}")
 
             symbol = data.get("symbol")
-            if not symbol:
-                print("No symbol in message!")
-                message.nack()
-                return
-
-            if symbol not in STOCK_CONFIGS:
-                print(f"Unknown symbol received: {symbol}")
-                message.nack()
+            if not symbol or symbol not in STOCK_CONFIGS:
+                print(f"Invalid symbol in message: {symbol}")
+                message.ack()  # Ack invalid messages to remove them from the queue
                 return
 
             if self.process_and_load_data(data, symbol):
@@ -162,10 +161,13 @@ def process_and_load_data(self, data: dict, symbol: str):
 
         except Exception as e:
             print(f"Error in callback: {e}")
-            import traceback
-
-            print(traceback.format_exc())
             message.nack()
+
+    def cleanup(self):
+        """Load any remaining batches before shutting down"""
+        for symbol in self.batch_data.keys():
+            if self.batch_data[symbol]:
+                self.load_batch(symbol)
 
 
 def main():
@@ -182,6 +184,7 @@ def main():
         streaming_pull_future.result()
     except KeyboardInterrupt:
         streaming_pull_future.cancel()
+        loader.cleanup()  # Load any remaining batches
         print("Stopped listening for messages")
 
 
