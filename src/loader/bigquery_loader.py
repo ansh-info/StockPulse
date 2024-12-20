@@ -19,7 +19,34 @@ class BigQueryLoader:
         self.batch_timeout = 60  # Seconds to wait before loading a non-full batch
         self.batch_data = defaultdict(list)
         self.last_load_time = defaultdict(float)
+
+        # Ensure dataset exists before creating tables
+        self.setup_dataset()
         self.setup_tables()
+
+    def setup_dataset(self):
+        """Create the dataset if it doesn't exist"""
+        try:
+            dataset_id = f"{GCP_CONFIG['PROJECT_ID']}.{GCP_CONFIG['DATASET_NAME']}"
+            try:
+                self.client.get_dataset(dataset_id)
+                print(f"Dataset {dataset_id} already exists")
+            except Exception:
+                # Construct a full dataset object
+                dataset = bigquery.Dataset(dataset_id)
+
+                # Specify dataset location
+                dataset.location = (
+                    "US"  # You can change this to your preferred location
+                )
+
+                # Create the dataset
+                dataset = self.client.create_dataset(dataset, exists_ok=True)
+                print(f"Created dataset {dataset_id}")
+
+        except Exception as e:
+            print(f"Error setting up dataset: {e}")
+            raise
 
     def setup_tables(self):
         """Create both raw and processed tables for all configured stocks"""
@@ -171,21 +198,25 @@ class BigQueryLoader:
 
 
 def main():
-    loader = BigQueryLoader()
-    subscriber = pubsub_v1.SubscriberClient()
-    subscription_path = subscriber.subscription_path(
-        GCP_CONFIG["PROJECT_ID"], "stock-data-sub"
-    )
-
-    streaming_pull_future = subscriber.subscribe(subscription_path, loader.callback)
-    print(f"Starting to listen for messages on {subscription_path}")
-
     try:
-        streaming_pull_future.result()
-    except KeyboardInterrupt:
-        streaming_pull_future.cancel()
-        loader.cleanup()  # Load any remaining batches
-        print("Stopped listening for messages")
+        loader = BigQueryLoader()
+        subscriber = pubsub_v1.SubscriberClient()
+        subscription_path = subscriber.subscription_path(
+            GCP_CONFIG["PROJECT_ID"], "stock-data-sub"
+        )
+
+        streaming_pull_future = subscriber.subscribe(subscription_path, loader.callback)
+        print(f"Starting to listen for messages on {subscription_path}")
+
+        try:
+            streaming_pull_future.result()
+        except KeyboardInterrupt:
+            streaming_pull_future.cancel()
+            loader.cleanup()  # Load any remaining batches
+            print("Stopped listening for messages")
+    except Exception as e:
+        print(f"Error initializing BigQuery Loader: {e}")
+        raise
 
 
 if __name__ == "__main__":
