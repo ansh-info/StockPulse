@@ -59,35 +59,49 @@ class BigQueryLoader:
 
             print(f"Ensured tables exist for {symbol}")
 
-    def process_and_load_data(self, raw_data_df, symbol):
+    def process_and_load_data(self, data: dict, symbol: str):
         """Process raw data and load both raw and processed data into BigQuery"""
         try:
+            # Create DataFrame from the message data
+            raw_df = pd.DataFrame(
+                [
+                    {
+                        "timestamp": pd.to_datetime(data["timestamp"]),
+                        "symbol": data["symbol"],
+                        "open": float(data["open"]),
+                        "high": float(data["high"]),
+                        "low": float(data["low"]),
+                        "close": float(data["close"]),
+                        "volume": int(data["volume"]),
+                    }
+                ]
+            )
+
             # Process the data
             processed_df = self.preprocessor.process_stock_data(
-                raw_data_df,
-                resample_freq=None,  # Keep original 5-min frequency
+                raw_df.copy(),
+                resample_freq=None,  # Keep original frequency
                 fill_gaps=True,
                 calculate_indicators=True,
             )
 
+            # Reset index to make timestamp a column
+            processed_df = processed_df.reset_index()
+
             # Load raw data
-            raw_table_id = self.raw_tables[symbol].table_id
-            raw_errors = self.client.load_table_from_dataframe(
-                raw_data_df, raw_table_id
-            ).result()
+            raw_table_id = f"{GCP_CONFIG['PROJECT_ID']}.{GCP_CONFIG['DATASET_NAME']}.{STOCK_CONFIGS[symbol]['table_name']}_raw"
+            job_raw = self.client.load_table_from_dataframe(raw_df, raw_table_id)
+            job_raw.result()  # Wait for the job to complete
 
             # Load processed data
-            processed_table_id = self.processed_tables[symbol].table_id
-            processed_errors = self.client.load_table_from_dataframe(
+            processed_table_id = f"{GCP_CONFIG['PROJECT_ID']}.{GCP_CONFIG['DATASET_NAME']}.{STOCK_CONFIGS[symbol]['table_name']}_processed"
+            job_processed = self.client.load_table_from_dataframe(
                 processed_df, processed_table_id
-            ).result()
+            )
+            job_processed.result()  # Wait for the job to complete
 
-            if not raw_errors and not processed_errors:
-                print(f"Data loaded successfully for {symbol}")
-                return True
-            else:
-                print(f"Errors loading data for {symbol}")
-                return False
+            print(f"Data loaded successfully for {symbol}")
+            return True
 
         except Exception as e:
             print(f"Error processing and loading data: {e}")
@@ -104,11 +118,8 @@ class BigQueryLoader:
                 message.nack()
                 return
 
-            # Convert message to DataFrame for processing
-            df = pd.DataFrame([data])
-
             # Process and load the data
-            if self.process_and_load_data(df, symbol):
+            if self.process_and_load_data(data, symbol):
                 message.ack()
             else:
                 message.nack()
