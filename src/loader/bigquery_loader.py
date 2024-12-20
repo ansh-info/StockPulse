@@ -59,96 +59,81 @@ class BigQueryLoader:
 
             print(f"Ensured tables exist for {symbol}")
 
-    def process_and_load_data(self, data: dict, symbol: str):
-        """Process raw data and load both raw and processed data into BigQuery"""
+    # bigquery_loader.py
+
+
+def process_and_load_data(self, data: dict, symbol: str):
+    """Process raw data and load both raw and processed data into BigQuery"""
+    try:
+        # Debug print
+        print("Received data:", data)
+        print("Data types:", {k: type(v) for k, v in data.items()})
+
+        # Use current timestamp if not provided
+        if "timestamp" not in data:
+            data["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            print("Added missing timestamp:", data["timestamp"])
+
         try:
-            # Debug print
-            print("Received data:", data)
-            print("Data types:", {k: type(v) for k, v in data.items()})
-
-            # Ensure timestamp exists and is in the correct format
-            if "timestamp" not in data:
-                print("No timestamp in data!")
-                return False
-
-            try:
-                # Convert timestamp string to pandas timestamp
-                timestamp = pd.to_datetime(data["timestamp"])
-                print(f"Converted timestamp: {timestamp}")
-            except Exception as e:
-                print(f"Error converting timestamp: {e}")
-                return False
-
-            # Create DataFrame with explicit data types
-            raw_df = pd.DataFrame(
-                [
-                    {
-                        "timestamp": timestamp,
-                        "symbol": str(data["symbol"]),
-                        "open": float(data["open"]),
-                        "high": float(data["high"]),
-                        "low": float(data["low"]),
-                        "close": float(data["close"]),
-                        "volume": int(data["volume"]),
-                    }
-                ]
-            )
-
-            print("Created raw DataFrame:")
-            print(raw_df.dtypes)
-            print(raw_df.head())
-
-            # Create a copy for processing
-            try:
-                df_for_processing = raw_df.copy()
-                print("Starting preprocessing...")
-                processed_df = self.preprocessor.process_stock_data(
-                    df_for_processing,
-                    resample_freq=None,
-                    fill_gaps=True,
-                    calculate_indicators=True,
-                )
-                print("Preprocessing complete")
-            except Exception as e:
-                print(f"Error during preprocessing: {e}")
-                return False
-
-            # Reset index to make timestamp a column
-            processed_df = processed_df.reset_index()
-
-            # Load raw data
-            raw_table_id = f"{GCP_CONFIG['PROJECT_ID']}.{GCP_CONFIG['DATASET_NAME']}.{STOCK_CONFIGS[symbol]['table_name']}_raw"
-            print(f"Loading raw data to table: {raw_table_id}")
-            try:
-                job_raw = self.client.load_table_from_dataframe(raw_df, raw_table_id)
-                job_raw.result()
-                print("Raw data loaded successfully")
-            except Exception as e:
-                print(f"Error loading raw data: {e}")
-                return False
-
-            # Load processed data
-            processed_table_id = f"{GCP_CONFIG['PROJECT_ID']}.{GCP_CONFIG['DATASET_NAME']}.{STOCK_CONFIGS[symbol]['table_name']}_processed"
-            print(f"Loading processed data to table: {processed_table_id}")
-            try:
-                job_processed = self.client.load_table_from_dataframe(
-                    processed_df, processed_table_id
-                )
-                job_processed.result()
-                print("Processed data loaded successfully")
-            except Exception as e:
-                print(f"Error loading processed data: {e}")
-                return False
-
-            print(f"All data loaded successfully for {symbol}")
-            return True
-
+            # Convert timestamp string to pandas timestamp
+            timestamp = pd.to_datetime(data["timestamp"])
+            print(f"Converted timestamp: {timestamp}")
         except Exception as e:
-            print(f"Error in process_and_load_data: {e}")
-            import traceback
-
-            print(traceback.format_exc())
+            print(f"Error converting timestamp: {e}")
             return False
+
+        # Create DataFrame with explicit data types
+        raw_df = pd.DataFrame(
+            [
+                {
+                    "timestamp": timestamp,
+                    "symbol": str(data["symbol"]),
+                    "open": float(data["open"]),
+                    "high": float(data["high"]),
+                    "low": float(data["low"]),
+                    "close": float(data["close"]),
+                    "volume": int(data["volume"]),
+                }
+            ]
+        )
+
+        print("Created raw DataFrame:")
+        print(raw_df.dtypes)
+        print(raw_df.head())
+
+        # Create a copy for processing
+        df_for_processing = raw_df.copy()
+        processed_df = self.preprocessor.process_stock_data(
+            df_for_processing,
+            resample_freq=None,
+            fill_gaps=True,
+            calculate_indicators=True,
+        )
+
+        # Reset index to make timestamp a column
+        processed_df = processed_df.reset_index()
+
+        # Load raw data
+        raw_table_id = f"{GCP_CONFIG['PROJECT_ID']}.{GCP_CONFIG['DATASET_NAME']}.{STOCK_CONFIGS[symbol]['table_name']}_raw"
+        job_raw = self.client.load_table_from_dataframe(raw_df, raw_table_id)
+        job_raw.result()
+
+        # Load processed data
+        processed_table_id = f"{GCP_CONFIG['PROJECT_ID']}.{GCP_CONFIG['DATASET_NAME']}.{STOCK_CONFIGS[symbol]['table_name']}_processed"
+        job_processed = self.client.load_table_from_dataframe(
+            processed_df, processed_table_id
+        )
+        job_processed.result()
+
+        print(f"Data loaded successfully for {symbol}")
+        return True
+
+    except Exception as e:
+        print(f"Error in process_and_load_data: {e}")
+        import traceback
+
+        print(traceback.format_exc())
+        return False
 
     def callback(self, message):
         """Handle incoming Pub/Sub messages"""
