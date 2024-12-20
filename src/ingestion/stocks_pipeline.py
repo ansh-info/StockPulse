@@ -1,11 +1,10 @@
 import json
 import time
 from datetime import datetime
-from typing import Dict
 
-import requests
-import schedule
+import pandas as pd
 from google.cloud import pubsub_v1, storage
+from preprocessing_pipeline import StockDataPreprocessor
 
 from config import GCP_CONFIG, STOCK_CONFIGS, get_api_url
 
@@ -14,31 +13,62 @@ class StockDataPipeline:
     def __init__(self):
         self.publisher = pubsub_v1.PublisherClient()
         self.storage_client = storage.Client()
+        self.preprocessor = StockDataPreprocessor()
         self.topic_path = self.publisher.topic_path(
             GCP_CONFIG["PROJECT_ID"], GCP_CONFIG["TOPIC_NAME"]
         )
 
-    def save_to_gcs(self, data: Dict, symbol: str, timestamp: str) -> None:
-        """Save raw data to Google Cloud Storage"""
+    def save_to_gcs(self, data, symbol: str, timestamp: str) -> None:
+        """Save both raw and processed data to Google Cloud Storage"""
         try:
             bucket = self.storage_client.bucket(GCP_CONFIG["BUCKET_NAME"])
-            blob = bucket.blob(f"raw-data/{symbol}/{timestamp}.json")
-            blob.upload_from_string(json.dumps(data))
-            print(f"Saved raw data to GCS: {symbol} - {timestamp}")
+
+            # Save raw data
+            raw_blob = bucket.blob(f"raw-data/{symbol}/{timestamp}.json")
+            raw_blob.upload_from_string(json.dumps(data))
+
+            # Save processed data
+            if isinstance(data, dict) and "Time Series (5min)" in data:
+                # Convert to DataFrame and process
+                df = pd.DataFrame.from_dict(data["Time Series (5min)"], orient="index")
+                df.index.name = "timestamp"
+                df.columns = [col.split(". ")[1] for col in df.columns]
+
+                processed_df = self.preprocessor.process_stock_data(df)
+                processed_blob = bucket.blob(
+                    f"processed-data/{symbol}/{timestamp}.json"
+                )
+                processed_blob.upload_from_string(processed_df.to_json())
+
+            print(f"Saved data to GCS: {symbol} - {timestamp}")
+
         except Exception as e:
             print(f"Error saving to GCS: {e}")
 
-    def publish_to_pubsub(self, record: Dict) -> None:
+    def publish_to_pubsub(self, record: dict) -> None:
         """Publish record to Pub/Sub"""
         try:
-            message = json.dumps(record).encode("utf-8")
+            # Create DataFrame for preprocessing
+            df = pd.DataFrame([record])
+
+            # Process the data
+            processed_df = self.preprocessor.process_stock_data(
+                df, resample_freq=None, fill_gaps=True, calculate_indicators=True
+            )
+
+            # Convert processed data back to record format
+            processed_record = processed_df.iloc[0].to_dict()
+
+            # Publish processed data
+            message = json.dumps(processed_record).encode("utf-8")
             future = self.publisher.publish(self.topic_path, data=message)
             message_id = future.result()
             print(f"Published message {message_id} for {record['symbol']}")
+
         except Exception as e:
             print(f"Error publishing to Pub/Sub: {e}")
 
-    def fetch_stock_data(self, symbol: str, config: Dict) -> None:
+    def fetch_stock_data(self, symbol: str, config: dict) -> None:
         """Fetch and process data for a single stock"""
         api_url = get_api_url(
             symbol=symbol, interval=config["interval"], api_key=config["api_key"]
@@ -52,7 +82,7 @@ class StockDataPipeline:
                 time_series = data["Time Series (5min)"]
                 current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-                # Save raw response to GCS
+                # Save both raw and processed data to GCS
                 self.save_to_gcs(data, symbol, current_time)
 
                 # Process and publish each data point
@@ -75,8 +105,7 @@ class StockDataPipeline:
         except Exception as e:
             print(f"Error processing {symbol}: {e}")
 
-        # Add delay to respect rate limits
-        time.sleep(12)  # Alpha Vantage free tier allows 5 calls per minute
+        time.sleep(12)  # Rate limiting
 
 
 def main():
