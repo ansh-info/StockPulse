@@ -2,6 +2,7 @@ from datetime import datetime, timedelta
 
 import numpy as np
 import pandas as pd
+import pandas_gbq
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
@@ -30,7 +31,11 @@ class StockDashboard:
         WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
         ORDER BY timestamp
         """
-        return pd.read_gbq(query, project_id=GCP_CONFIG["PROJECT_ID"])
+        return pandas_gbq.read_gbq(
+            query,
+            project_id=GCP_CONFIG["PROJECT_ID"],
+            progress_bar_type=None,  # Disable progress bar to avoid cluttering streamlit
+        )
 
     def calculate_daily_summary(self, days=30):
         """Calculate daily summary using pandas"""
