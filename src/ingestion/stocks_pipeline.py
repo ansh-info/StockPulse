@@ -1,138 +1,100 @@
-import csv
 import json
-import os
 import time
 from datetime import datetime
+from typing import Dict
 
 import requests
 import schedule
 from google.cloud import pubsub_v1, storage
 
-# GCP Configuration
-PROJECT_ID = "stock-data-pipeline-444011"
-BUCKET_NAME = "stock-data-pipeline-bucket"
-TOPIC_NAME = "stock-data"
-
-# Constants
-STOCK_FILENAME = "amazon_stock_data.csv"
-LOG_FILENAME = "update_log.txt"
-API_URL = "https://www.alphavantage.co/query?function=TIME_SERIES_INTRADAY&symbol=AMZN&interval=5min&outputsize=full&apikey=J30SRXLUMQK4EW8Y"
-
-# Initialize GCP clients
-publisher = pubsub_v1.PublisherClient()
-storage_client = storage.Client()
-topic_path = publisher.topic_path(PROJECT_ID, TOPIC_NAME)
+from config import GCP_CONFIG, STOCK_CONFIGS, get_api_url
 
 
-def load_existing_timestamps():
-    if not os.path.exists(STOCK_FILENAME):
-        return set()
-    with open(STOCK_FILENAME, mode="r") as file:
-        reader = csv.reader(file)
-        next(reader)  # Skip header
-        return {row[0] for row in reader}
+class StockDataPipeline:
+    def __init__(self):
+        self.publisher = pubsub_v1.PublisherClient()
+        self.storage_client = storage.Client()
+        self.topic_path = self.publisher.topic_path(
+            GCP_CONFIG["PROJECT_ID"], GCP_CONFIG["TOPIC_NAME"]
+        )
 
+    def save_to_gcs(self, data: Dict, symbol: str, timestamp: str) -> None:
+        """Save raw data to Google Cloud Storage"""
+        try:
+            bucket = self.storage_client.bucket(GCP_CONFIG["BUCKET_NAME"])
+            blob = bucket.blob(f"raw-data/{symbol}/{timestamp}.json")
+            blob.upload_from_string(json.dumps(data))
+            print(f"Saved raw data to GCS: {symbol} - {timestamp}")
+        except Exception as e:
+            print(f"Error saving to GCS: {e}")
 
-def save_to_gcs(data, timestamp):
-    """Save data to Google Cloud Storage"""
-    try:
-        bucket = storage_client.bucket(BUCKET_NAME)
-        blob = bucket.blob(f"raw-data/AMZN/{timestamp}.json")
-        blob.upload_from_string(json.dumps(data))
-        print(f"Saved raw data to GCS: {timestamp}")
-    except Exception as e:
-        print(f"Error saving to GCS: {e}")
+    def publish_to_pubsub(self, record: Dict) -> None:
+        """Publish record to Pub/Sub"""
+        try:
+            message = json.dumps(record).encode("utf-8")
+            future = self.publisher.publish(self.topic_path, data=message)
+            message_id = future.result()
+            print(f"Published message {message_id} for {record['symbol']}")
+        except Exception as e:
+            print(f"Error publishing to Pub/Sub: {e}")
 
+    def fetch_stock_data(self, symbol: str, config: Dict) -> None:
+        """Fetch and process data for a single stock"""
+        api_url = get_api_url(
+            symbol=symbol, interval=config["interval"], api_key=config["api_key"]
+        )
 
-def publish_to_pubsub(record):
-    """Publish record to Pub/Sub"""
-    try:
-        message = json.dumps(record).encode("utf-8")
-        future = publisher.publish(topic_path, data=message)
-        message_id = future.result()
-        print(f"Published message {message_id}")
-    except Exception as e:
-        print(f"Error publishing to Pub/Sub: {e}")
+        try:
+            r = requests.get(api_url)
+            data = r.json()
 
+            if "Time Series (5min)" in data:
+                time_series = data["Time Series (5min)"]
+                current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-def fetch_stock_data():
-    # Fetch data from the API
-    r = requests.get(API_URL)
-    data = r.json()
+                # Save raw response to GCS
+                self.save_to_gcs(data, symbol, current_time)
 
-    if "Time Series (5min)" in data:
-        time_series = data["Time Series (5min)"]
-        existing_timestamps = load_existing_timestamps()
-        new_rows = []
+                # Process and publish each data point
+                for timestamp, values in time_series.items():
+                    record = {
+                        "timestamp": timestamp,
+                        "symbol": symbol,
+                        "open": float(values["1. open"]),
+                        "high": float(values["2. high"]),
+                        "low": float(values["3. low"]),
+                        "close": float(values["4. close"]),
+                        "volume": int(values["5. volume"]),
+                    }
+                    self.publish_to_pubsub(record)
 
-        # Save raw response to GCS
-        current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
-        save_to_gcs(data, current_time)
+                print(f"Successfully processed data for {symbol}")
+            else:
+                print(f"Error: Time Series data not found in the response for {symbol}")
 
-        for timestamp, values in time_series.items():
-            if timestamp not in existing_timestamps:
-                # Prepare row for CSV
-                row = [
-                    timestamp,
-                    values["1. open"],
-                    values["2. high"],
-                    values["3. low"],
-                    values["4. close"],
-                    values["5. volume"],
-                ]
-                new_rows.append(row)
+        except Exception as e:
+            print(f"Error processing {symbol}: {e}")
 
-                # Prepare and publish record to Pub/Sub
-                record = {
-                    "timestamp": timestamp,
-                    "symbol": "AMZN",
-                    "open": float(values["1. open"]),
-                    "high": float(values["2. high"]),
-                    "low": float(values["3. low"]),
-                    "close": float(values["4. close"]),
-                    "volume": int(values["5. volume"]),
-                }
-                publish_to_pubsub(record)
-
-        if new_rows:
-            # Save to local CSV
-            file_exists = os.path.exists(STOCK_FILENAME)
-            with open(STOCK_FILENAME, mode="a", newline="") as file:
-                writer = csv.writer(file)
-                if not file_exists:
-                    header = ["Timestamp", "Open", "High", "Low", "Close", "Volume"]
-                    writer.writerow(header)
-                writer.writerows(new_rows)
-
-            # Log the update
-            with open(LOG_FILENAME, mode="a") as log_file:
-                log_file.write(
-                    f"{datetime.now()}: Added {len(new_rows)} new rows to {STOCK_FILENAME}\n"
-                )
-            print(f"Data successfully updated. Added {len(new_rows)} new rows.")
-
-            # Upload CSV to GCS
-            bucket = storage_client.bucket(BUCKET_NAME)
-            blob = bucket.blob(f"processed-data/AMZN/{STOCK_FILENAME}")
-            blob.upload_from_filename(STOCK_FILENAME)
-            print(f"Uploaded {STOCK_FILENAME} to GCS")
-        else:
-            print("No new data to update.")
-    else:
-        print("Error: Time Series data not found in the response")
+        # Add delay to respect rate limits
+        time.sleep(12)  # Alpha Vantage free tier allows 5 calls per minute
 
 
 def main():
-    print("Starting stock data pipeline...")
+    pipeline = StockDataPipeline()
+
+    def process_all_stocks():
+        """Process all configured stocks"""
+        for symbol, config in STOCK_CONFIGS.items():
+            pipeline.fetch_stock_data(symbol, config)
+
     # Schedule the task to run every hour
-    schedule.every(1).hour.do(fetch_stock_data)
+    schedule.every(1).hour.do(process_all_stocks)
 
-    # Run the function immediately for the first iteration
-    print("Fetching data for the first time...")
-    fetch_stock_data()
+    # Run immediately for the first time
+    print("Starting initial data fetch...")
+    process_all_stocks()
 
-    print("Scheduler is running. Press Ctrl+C to stop.")
-    # Keep the script running to execute the scheduler
+    # Keep the script running
     while True:
         try:
             schedule.run_pending()
@@ -142,7 +104,7 @@ def main():
             break
         except Exception as e:
             print(f"Error occurred: {e}")
-            time.sleep(60)  # Wait before retrying
+            time.sleep(60)
 
 
 if __name__ == "__main__":
