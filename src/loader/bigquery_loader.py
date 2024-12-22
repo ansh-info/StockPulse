@@ -29,16 +29,18 @@ class BigQueryLoader:
         self.processed_tables = {}
 
         # Initialize batch processing attributes
-        self.batch_size = 100  # Reduced for better rate limit handling
-        self.batch_timeout = 180  # Increased for better batching
-        self.min_batch_interval = 2.0  # Minimum seconds between batches
+        self.batch_size = 50  # Reduced batch size
+        self.batch_timeout = 240  # Increased timeout
+        self.min_batch_interval = 5.0  # Minimum seconds between batches
         self.batch_data = defaultdict(list)
         self.last_load_time = defaultdict(float)
+        self.max_concurrent_loads = 3  # Limit concurrent operations
+        self.active_loads = 0  # Track current loads
 
         # Initialize retry parameters
         self.max_retries = 5
         self.initial_retry_delay = 2
-        self.max_retry_delay = 32
+        self.max_retry_delay = 64  # Increased max delay
 
         # Define column schemas
         self.raw_columns = [
@@ -101,20 +103,30 @@ class BigQueryLoader:
             print(f"Error setting up logging: {e}")
             raise
 
+    def wait_for_slot(self):
+        """Wait for an available loading slot"""
+        while self.active_loads >= self.max_concurrent_loads:
+            time.sleep(1)
+        self.active_loads += 1
+        self.logger.debug(f"Acquired loading slot. Active loads: {self.active_loads}")
+
+    def release_slot(self):
+        """Release a loading slot"""
+        self.active_loads = max(0, self.active_loads - 1)
+        self.logger.debug(f"Released loading slot. Active loads: {self.active_loads}")
+
     def exponential_backoff(self, attempt):
         """Calculate exponential backoff time with jitter"""
-        delay = min(self.max_retry_delay, self.initial_retry_delay * (2**attempt))
-        jitter = random.uniform(0, 0.1 * delay)
+        delay = min(self.max_retry_delay, self.initial_retry_delay * (4**attempt))
+        jitter = random.uniform(0, 0.2 * delay)
         return delay + jitter
 
     def load_batch_with_retry(self, df, table_id, job_config):
         """Load data to BigQuery with exponential backoff retry"""
         for attempt in range(self.max_retries):
             try:
-                # Verify DataFrame columns before loading
                 df = df.copy()
 
-                # Log column information for debugging
                 self.logger.debug(
                     f"Attempting to load DataFrame with columns: {df.columns.tolist()}"
                 )
@@ -246,7 +258,6 @@ class BigQueryLoader:
         current_time = time.time()
         time_since_last_load = current_time - self.last_load_time[symbol]
 
-        # Check if minimum interval has passed
         if time_since_last_load < self.min_batch_interval:
             return False
 
@@ -261,60 +272,62 @@ class BigQueryLoader:
             return True
 
         try:
-            batch_size = len(self.batch_data[symbol])
-            self.logger.info(
-                f"Attempting to load batch of {batch_size} records for {symbol}"
-            )
+            # Wait for available slot
+            self.wait_for_slot()
 
-            # Create raw DataFrame and ensure columns match schema
-            raw_df = pd.DataFrame(self.batch_data[symbol])
-            raw_df["timestamp"] = pd.to_datetime(raw_df["timestamp"])
-            raw_df = raw_df[self.raw_columns]  # Ensure column order matches schema
-
-            # Process data for the processed table
-            processed_df = self.preprocessor.process_stock_data(
-                raw_df.copy(),
-                resample_freq=None,
-                fill_gaps=True,
-                calculate_indicators=True,
-            )
-
-            # Ensure processed columns match schema
-            processed_df = processed_df[self.processed_columns]
-
-            job_config = bigquery.LoadJobConfig(
-                write_disposition=bigquery.WriteDisposition.WRITE_APPEND
-            )
-
-            # Add delay to respect rate limits
-            time.sleep(2)
-
-            # Load raw data
-            raw_table_id = f"{GCP_CONFIG['PROJECT_ID']}.{GCP_CONFIG['DATASET_NAME']}.{STOCK_CONFIGS[symbol]['table_name']}_raw"
-            raw_success = self.load_batch_with_retry(raw_df, raw_table_id, job_config)
-
-            if raw_success:
-                # Add delay before processing table update
-                time.sleep(2)
-
-                processed_table_id = f"{GCP_CONFIG['PROJECT_ID']}.{GCP_CONFIG['DATASET_NAME']}.{STOCK_CONFIGS[symbol]['table_name']}_processed"
-                processed_success = self.load_batch_with_retry(
-                    processed_df, processed_table_id, job_config
+            try:
+                batch_size = len(self.batch_data[symbol])
+                self.logger.info(
+                    f"Attempting to load batch of {batch_size} records for {symbol}"
                 )
 
-                if processed_success:
-                    self.logger.info(
-                        f"Successfully loaded batch of {batch_size} records for {symbol}"
+                raw_df = pd.DataFrame(self.batch_data[symbol])
+                raw_df["timestamp"] = pd.to_datetime(raw_df["timestamp"])
+                raw_df = raw_df[self.raw_columns]
+
+                processed_df = self.preprocessor.process_stock_data(
+                    raw_df.copy(),
+                    resample_freq=None,
+                    fill_gaps=True,
+                    calculate_indicators=True,
+                )
+                processed_df = processed_df[self.processed_columns]
+
+                job_config = bigquery.LoadJobConfig(
+                    write_disposition=bigquery.WriteDisposition.WRITE_APPEND
+                )
+
+                time.sleep(5)  # Delay before raw data load
+
+                raw_table_id = f"{GCP_CONFIG['PROJECT_ID']}.{GCP_CONFIG['DATASET_NAME']}.{STOCK_CONFIGS[symbol]['table_name']}_raw"
+                raw_success = self.load_batch_with_retry(
+                    raw_df, raw_table_id, job_config
+                )
+
+                if raw_success:
+                    time.sleep(5)  # Delay before processed data load
+
+                    processed_table_id = f"{GCP_CONFIG['PROJECT_ID']}.{GCP_CONFIG['DATASET_NAME']}.{STOCK_CONFIGS[symbol]['table_name']}_processed"
+                    processed_success = self.load_batch_with_retry(
+                        processed_df, processed_table_id, job_config
                     )
-                    self.batch_data[symbol] = []
-                    self.last_load_time[symbol] = time.time()
-                    return True
+
+                    if processed_success:
+                        self.logger.info(
+                            f"Successfully loaded batch of {batch_size} records for {symbol}"
+                        )
+                        self.batch_data[symbol] = []
+                        self.last_load_time[symbol] = time.time()
+                        return True
+                    else:
+                        self.logger.error("Failed to load processed data batch")
+                        return False
                 else:
-                    self.logger.error("Failed to load processed data batch")
+                    self.logger.error("Failed to load raw data batch")
                     return False
-            else:
-                self.logger.error("Failed to load raw data batch")
-                return False
+
+            finally:
+                self.release_slot()
 
         except Exception as e:
             self.logger.error(f"Error loading batch for {symbol}: {e}")
