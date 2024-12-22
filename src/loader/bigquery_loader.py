@@ -240,8 +240,10 @@ class BigQueryLoader:
                 # For raw data - preserve exact format from API
                 raw_records = []
                 for record in self.batch_data[symbol]:
+                    # Convert timestamp to proper datetime format
+                    timestamp = pd.to_datetime(record["timestamp"])
                     raw_record = {
-                        "Timestamp": record["timestamp"],
+                        "Timestamp": timestamp,
                         "Open": float(record["open"]),
                         "High": float(record["high"]),
                         "Low": float(record["low"]),
@@ -251,6 +253,11 @@ class BigQueryLoader:
                     raw_records.append(raw_record)
 
                 raw_df = pd.DataFrame(raw_records)
+                # Ensure timestamp is in correct format for BigQuery
+                raw_df["Timestamp"] = pd.to_datetime(raw_df["Timestamp"]).dt.strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                )
+
                 # Sort by timestamp in descending order to match API format
                 raw_df = raw_df.sort_values("Timestamp", ascending=False)
                 # Remove any potential duplicates while preserving order
@@ -280,6 +287,8 @@ class BigQueryLoader:
                     proc_df = raw_df.copy()
                     # Convert to lowercase for processing
                     proc_df.columns = proc_df.columns.str.lower()
+                    # Convert timestamp back to datetime for processing
+                    proc_df["timestamp"] = pd.to_datetime(proc_df["timestamp"])
                     proc_df["symbol"] = symbol
 
                     # Process the data
