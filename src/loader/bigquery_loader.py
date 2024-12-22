@@ -6,7 +6,7 @@ import time
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict
 
 import pandas as pd
 from google.cloud import bigquery, pubsub_v1
@@ -140,6 +140,7 @@ class BigQueryLoader:
         self.logger.info("Setting up tables...")
         dataset_ref = f"{GCP_CONFIG['PROJECT_ID']}.{GCP_CONFIG['DATASET_NAME']}"
 
+        # Raw table schema (kept exactly as received)
         raw_schema = [
             bigquery.SchemaField("timestamp", "TIMESTAMP"),
             bigquery.SchemaField("symbol", "STRING"),
@@ -150,6 +151,7 @@ class BigQueryLoader:
             bigquery.SchemaField("volume", "INTEGER"),
         ]
 
+        # Processed table schema (includes calculated fields)
         processed_schema = raw_schema + [
             bigquery.SchemaField("date", "DATE"),
             bigquery.SchemaField("time", "TIME"),
@@ -229,17 +231,12 @@ class BigQueryLoader:
                     f"Attempting to load batch of {batch_size} records for {symbol}"
                 )
 
-                # Create DataFrame and process data
+                # Create raw DataFrame without any modifications
                 raw_df = pd.DataFrame(self.batch_data[symbol])
-                raw_df["timestamp"] = pd.to_datetime(raw_df["timestamp"])
                 raw_df = raw_df[self.raw_columns]
 
-                # Process data using improved preprocessor
-                processed_df = self.preprocessor.process_stock_data(
-                    raw_df.copy(), check_market_hours=True
-                )
-
-                # Ensure processed DataFrame has all required columns
+                # Create processed DataFrame
+                processed_df = self.preprocessor.process_stock_data(raw_df.copy())
                 processed_df = processed_df[self.processed_columns]
 
                 # Configure job
@@ -247,7 +244,7 @@ class BigQueryLoader:
                     write_disposition=bigquery.WriteDisposition.WRITE_APPEND
                 )
 
-                # Load raw data
+                # Load raw data first
                 raw_table_id = f"{GCP_CONFIG['PROJECT_ID']}.{GCP_CONFIG['DATASET_NAME']}.{STOCK_CONFIGS[symbol]['table_name']}_raw"
                 raw_success = self.load_batch_with_retry(
                     raw_df, raw_table_id, job_config
@@ -300,7 +297,7 @@ class BigQueryLoader:
     def process_and_load_data(self, data: dict, symbol: str) -> bool:
         """Process and potentially load data"""
         try:
-            # Add to batch
+            # Add to batch without any modifications
             self.batch_data[symbol].append(data)
 
             # Check if we should load the batch
