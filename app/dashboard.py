@@ -1,6 +1,6 @@
+# dashboard.py
 from datetime import datetime, timedelta
 
-import numpy as np
 import pandas as pd
 import pandas_gbq
 import plotly.express as px
@@ -16,193 +16,273 @@ class StockDashboard:
         self.client = bigquery.Client()
         self.dataset = f"{GCP_CONFIG['PROJECT_ID']}.{GCP_CONFIG['DATASET_NAME']}"
 
-    def get_stock_data(self, symbol, days=30):
-        """Get raw stock data from BigQuery"""
+    def get_stock_data(self, symbol, days=30, table_type="processed"):
+        """Get stock data from BigQuery with option for raw or processed data"""
+        table_suffix = "_processed" if table_type == "processed" else "_raw"
         query = f"""
-        SELECT
-            timestamp,
-            symbol,
-            open,
-            high,
-            low,
-            close,
-            volume
-        FROM {self.dataset}.{STOCK_CONFIGS[symbol]['table_name']}
+        SELECT *
+        FROM {self.dataset}.{STOCK_CONFIGS[symbol]['table_name']}{table_suffix}
         WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
         ORDER BY timestamp
         """
         return pandas_gbq.read_gbq(
-            query,
-            project_id=GCP_CONFIG["PROJECT_ID"],
-            progress_bar_type=None,  # Disable progress bar to avoid cluttering streamlit
+            query, project_id=GCP_CONFIG["PROJECT_ID"], progress_bar_type=None
         )
 
-    def calculate_daily_summary(self, days=30):
-        """Calculate daily summary using pandas"""
-        all_data = []
+    def calculate_metrics(self, symbol, data):
+        """Calculate key metrics for the stock"""
+        latest = data.iloc[-1]
+        prev_close = data.iloc[-2]["close"]
 
-        # Fetch data for each stock
-        for symbol in STOCK_CONFIGS.keys():
-            try:
-                df = self.get_stock_data(symbol, days)
-                if not df.empty:
-                    # Add date column
-                    df["date"] = pd.to_datetime(df["timestamp"]).dt.date
-                    all_data.append(df)
-            except Exception as e:
-                st.warning(f"Could not fetch data for {symbol}: {str(e)}")
-                continue
-
-        if not all_data:
-            return pd.DataFrame()
-
-        # Combine all stock data
-        combined_data = pd.concat(all_data, ignore_index=True)
-
-        # Calculate daily summary
-        daily_summary = []
-
-        for symbol in STOCK_CONFIGS.keys():
-            stock_data = combined_data[combined_data["symbol"] == symbol]
-            for date in stock_data["date"].unique():
-                day_data = stock_data[stock_data["date"] == date]
-                if not day_data.empty:
-                    daily_return = (
-                        (day_data["close"].iloc[-1] - day_data["open"].iloc[0])
-                        / day_data["open"].iloc[0]
-                        * 100
-                    )
-
-                    summary = {
-                        "date": date,
-                        "symbol": symbol,
-                        "day_open": day_data["open"].iloc[0],
-                        "day_high": day_data["high"].max(),
-                        "day_low": day_data["low"].min(),
-                        "day_close": day_data["close"].iloc[-1],
-                        "total_volume": day_data["volume"].sum(),
-                        "daily_return": daily_return,
-                    }
-                    daily_summary.append(summary)
-
-        return pd.DataFrame(daily_summary)
+        return {
+            "current_price": latest["close"],
+            "day_change": (latest["close"] - prev_close) / prev_close * 100,
+            "day_volume": latest["volume"],
+            "ma7": latest["ma7"],
+            "ma20": latest["ma20"],
+            "volatility": latest["volatility"],
+            "momentum": latest["momentum"],
+        }
 
 
 def main():
-    st.set_page_config(page_title="Stock Market Dashboard", layout="wide")
+    st.set_page_config(
+        page_title="Advanced Stock Market Dashboard",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
+
+    # Custom CSS
+    st.markdown(
+        """
+        <style>
+        .stock-metric {
+            font-size: 24px;
+            font-weight: bold;
+            margin: 10px 0;
+        }
+        .metric-label {
+            font-size: 14px;
+            color: #888;
+        }
+        .stButton>button {
+            width: 100%;
+        }
+        </style>
+    """,
+        unsafe_allow_html=True,
+    )
 
     # Initialize dashboard
     dashboard = StockDashboard()
 
-    # Sidebar
-    st.sidebar.title("Dashboard Controls")
-    selected_days = st.sidebar.slider("Select Days Range", 1, 90, 30)
+    # Sidebar Controls
+    st.sidebar.title("📊 Dashboard Controls")
 
-    # Title
-    st.title("Stock Market Analysis Dashboard")
+    # Time range selector
+    time_ranges = {"1 Day": 1, "1 Week": 7, "1 Month": 30, "3 Months": 90}
+    selected_range = st.sidebar.selectbox("Select Time Range", list(time_ranges.keys()))
+    selected_days = time_ranges[selected_range]
+
+    # Stock selector
+    selected_stock = st.sidebar.selectbox("Select Stock", list(STOCK_CONFIGS.keys()))
+
+    # View type selector
+    view_type = st.sidebar.radio(
+        "Select View Type",
+        ["Technical Analysis", "Volume Analysis", "Comparative Analysis"],
+    )
 
     try:
-        # Top level metrics
-        st.header("Market Overview")
-        daily_summary = dashboard.calculate_daily_summary(selected_days)
+        # Get data
+        processed_data = dashboard.get_stock_data(
+            selected_stock, selected_days, "processed"
+        )
 
-        if not daily_summary.empty:
-            # Create three columns for metrics
-            col1, col2, col3 = st.columns(3)
+        # Main content
+        st.title(f"📈 Advanced Stock Market Analysis - {selected_stock}")
 
-            latest_date = daily_summary["date"].max()
-            latest_data = daily_summary[daily_summary["date"] == latest_date]
+        # Key metrics row
+        metrics = dashboard.calculate_metrics(selected_stock, processed_data)
+        col1, col2, col3, col4 = st.columns(4)
+
+        with col1:
+            st.metric(
+                "Current Price",
+                f"${metrics['current_price']:.2f}",
+                f"{metrics['day_change']:.2f}%",
+            )
+        with col2:
+            st.metric("Volume", f"{metrics['day_volume']:,}")
+        with col3:
+            st.metric("MA7", f"${metrics['ma7']:.2f}")
+        with col4:
+            st.metric("Volatility", f"{metrics['volatility']:.2f}%")
+
+        if view_type == "Technical Analysis":
+            # Technical Analysis View
+            st.subheader("Technical Analysis")
+
+            # Candlestick with MA
+            fig = go.Figure()
+
+            # Candlestick
+            fig.add_trace(
+                go.Candlestick(
+                    x=processed_data["timestamp"],
+                    open=processed_data["open"],
+                    high=processed_data["high"],
+                    low=processed_data["low"],
+                    close=processed_data["close"],
+                    name="OHLC",
+                )
+            )
+
+            # Add MA lines
+            fig.add_trace(
+                go.Scatter(
+                    x=processed_data["timestamp"],
+                    y=processed_data["ma7"],
+                    name="MA7",
+                    line=dict(color="blue", width=1),
+                )
+            )
+
+            fig.add_trace(
+                go.Scatter(
+                    x=processed_data["timestamp"],
+                    y=processed_data["ma20"],
+                    name="MA20",
+                    line=dict(color="orange", width=1),
+                )
+            )
+
+            fig.update_layout(
+                title="Price Movement with Moving Averages",
+                yaxis_title="Price (USD)",
+                xaxis_title="Date",
+                height=600,
+                template="plotly_white",
+            )
+
+            st.plotly_chart(fig, use_container_width=True)
+
+            # Technical Indicators
+            col1, col2 = st.columns(2)
 
             with col1:
-                best_performer = latest_data.loc[latest_data["daily_return"].idxmax()]
-                st.metric(
-                    "Best Performer Today",
-                    best_performer["symbol"],
-                    f"{best_performer['daily_return']:.2f}%",
+                # Daily Returns
+                fig_returns = px.line(
+                    processed_data,
+                    x="timestamp",
+                    y="daily_return",
+                    title="Daily Returns (%)",
                 )
+                st.plotly_chart(fig_returns, use_container_width=True)
 
             with col2:
-                worst_performer = latest_data.loc[latest_data["daily_return"].idxmin()]
-                st.metric(
-                    "Worst Performer Today",
-                    worst_performer["symbol"],
-                    f"{worst_performer['daily_return']:.2f}%",
+                # Momentum
+                fig_momentum = px.line(
+                    processed_data, x="timestamp", y="momentum", title="Price Momentum"
                 )
+                st.plotly_chart(fig_momentum, use_container_width=True)
 
-            with col3:
-                highest_volume = latest_data.loc[latest_data["total_volume"].idxmax()]
-                st.metric(
-                    "Highest Volume Today",
-                    highest_volume["symbol"],
-                    f"{highest_volume['total_volume']:,.0f}",
+        elif view_type == "Volume Analysis":
+            # Volume Analysis View
+            st.subheader("Volume Analysis")
+
+            # Volume chart with MA
+            fig_volume = go.Figure()
+
+            fig_volume.add_trace(
+                go.Bar(
+                    x=processed_data["timestamp"],
+                    y=processed_data["volume"],
+                    name="Volume",
+                    marker_color="lightblue",
                 )
+            )
 
-            # Stock Price Charts
-            st.header("Stock Price Analysis")
-            selected_stock = st.selectbox("Select Stock", list(STOCK_CONFIGS.keys()))
-
-            stock_data = dashboard.get_stock_data(selected_stock, selected_days)
-
-            if not stock_data.empty:
-                # Candlestick chart
-                fig = go.Figure(
-                    data=[
-                        go.Candlestick(
-                            x=stock_data["timestamp"],
-                            open=stock_data["open"],
-                            high=stock_data["high"],
-                            low=stock_data["low"],
-                            close=stock_data["close"],
-                        )
-                    ]
+            fig_volume.add_trace(
+                go.Scatter(
+                    x=processed_data["timestamp"],
+                    y=processed_data["volume_ma5"],
+                    name="Volume MA5",
+                    line=dict(color="red", width=2),
                 )
+            )
 
-                fig.update_layout(
-                    title=f"{selected_stock} Price Movement",
-                    xaxis_title="Date",
-                    yaxis_title="Price (USD)",
+            fig_volume.update_layout(
+                title="Trading Volume Analysis",
+                yaxis_title="Volume",
+                xaxis_title="Date",
+                height=500,
+                template="plotly_white",
+            )
+
+            st.plotly_chart(fig_volume, use_container_width=True)
+
+            # Volume distribution
+            fig_vol_dist = px.histogram(
+                processed_data, x="volume", nbins=50, title="Volume Distribution"
+            )
+            st.plotly_chart(fig_vol_dist, use_container_width=True)
+
+        else:
+            # Comparative Analysis View
+            st.subheader("Comparative Analysis")
+
+            # Get data for all stocks
+            comparison_df = pd.DataFrame()
+
+            for symbol in STOCK_CONFIGS.keys():
+                try:
+                    stock_data = dashboard.get_stock_data(
+                        symbol, selected_days, "processed"
+                    )
+                    if not stock_data.empty:
+                        first_price = stock_data["close"].iloc[0]
+                        comparison_df[symbol] = (
+                            stock_data["close"] / first_price - 1
+                        ) * 100
+                        comparison_df["timestamp"] = stock_data["timestamp"]
+                except Exception as e:
+                    st.warning(f"Could not fetch data for {symbol}: {str(e)}")
+
+            if not comparison_df.empty:
+                fig_comparison = px.line(
+                    comparison_df,
+                    x="timestamp",
+                    y=[col for col in comparison_df.columns if col != "timestamp"],
+                    title="Relative Performance Comparison (%)",
                     height=600,
                 )
+                st.plotly_chart(fig_comparison, use_container_width=True)
 
-                st.plotly_chart(fig, use_container_width=True)
-
-                # Volume Analysis
-                st.header("Volume Analysis")
-                fig_volume = px.bar(
-                    stock_data,
-                    x="timestamp",
-                    y="volume",
-                    title=f"{selected_stock} Trading Volume",
+                # Correlation heatmap
+                correlation = comparison_df.drop("timestamp", axis=1).corr()
+                fig_corr = px.imshow(
+                    correlation,
+                    title="Stock Price Correlation Matrix",
+                    color_continuous_scale="RdBu",
                 )
-                st.plotly_chart(fig_volume, use_container_width=True)
+                st.plotly_chart(fig_corr, use_container_width=True)
 
-                # Performance Comparison
-                st.header("Performance Comparison")
-                comparison_df = pd.DataFrame()
-
-                for symbol in STOCK_CONFIGS.keys():
-                    symbol_data = dashboard.get_stock_data(symbol, selected_days)
-                    if not symbol_data.empty:
-                        first_price = symbol_data["close"].iloc[0]
-                        comparison_df[symbol] = (
-                            symbol_data["close"] / first_price - 1
-                        ) * 100
-                        comparison_df["timestamp"] = symbol_data["timestamp"]
-
-                if not comparison_df.empty:
-                    fig_comparison = px.line(
-                        comparison_df,
-                        x="timestamp",
-                        y=[col for col in comparison_df.columns if col != "timestamp"],
-                        title="Relative Performance Comparison (%)",
-                    )
-                    st.plotly_chart(fig_comparison, use_container_width=True)
-        else:
-            st.warning("No data available for the selected time range.")
+        # Additional Analysis Section
+        st.subheader("Statistical Summary")
+        summary_data = processed_data.describe()
+        st.dataframe(summary_data)
 
     except Exception as e:
         st.error(f"An error occurred: {str(e)}")
         st.write("Please try adjusting the date range or selecting a different stock.")
+
+    # Footer
+    st.markdown("---")
+    st.markdown(
+        "Data refreshes every 5 minutes. Last update: "
+        + datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    )
 
 
 if __name__ == "__main__":
