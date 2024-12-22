@@ -44,7 +44,10 @@ class BigQueryLoader:
         self.max_retry_delay = 64
 
         # Define column schemas
-        self.raw_columns = [
+        self.raw_columns = ["Timestamp", "Open", "High", "Low", "Close", "Volume"]
+
+        # Define processed columns (lowercase for processed data)
+        self.processed_columns = [
             "timestamp",
             "symbol",
             "open",
@@ -52,9 +55,6 @@ class BigQueryLoader:
             "low",
             "close",
             "volume",
-        ]
-
-        self.processed_columns = self.raw_columns + [
             "date",
             "time",
             "ma5",
