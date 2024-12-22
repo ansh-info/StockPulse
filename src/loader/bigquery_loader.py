@@ -140,8 +140,18 @@ class BigQueryLoader:
         self.logger.info("Setting up tables...")
         dataset_ref = f"{GCP_CONFIG['PROJECT_ID']}.{GCP_CONFIG['DATASET_NAME']}"
 
-        # Raw table schema (kept exactly as received)
+        # Raw table schema (exactly as received from API)
         raw_schema = [
+            bigquery.SchemaField("Timestamp", "TIMESTAMP"),
+            bigquery.SchemaField("Open", "FLOAT"),
+            bigquery.SchemaField("High", "FLOAT"),
+            bigquery.SchemaField("Low", "FLOAT"),
+            bigquery.SchemaField("Close", "FLOAT"),
+            bigquery.SchemaField("Volume", "INTEGER"),
+        ]
+
+        # Processed table schema (includes calculated fields)
+        processed_schema = [
             bigquery.SchemaField("timestamp", "TIMESTAMP"),
             bigquery.SchemaField("symbol", "STRING"),
             bigquery.SchemaField("open", "FLOAT"),
@@ -149,10 +159,6 @@ class BigQueryLoader:
             bigquery.SchemaField("low", "FLOAT"),
             bigquery.SchemaField("close", "FLOAT"),
             bigquery.SchemaField("volume", "INTEGER"),
-        ]
-
-        # Processed table schema (includes calculated fields)
-        processed_schema = raw_schema + [
             bigquery.SchemaField("date", "DATE"),
             bigquery.SchemaField("time", "TIME"),
             bigquery.SchemaField("ma5", "FLOAT"),
