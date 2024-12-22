@@ -348,14 +348,30 @@ class BigQueryLoader:
         """Handle incoming Pub/Sub messages"""
         try:
             self.logger.debug("Received new message...")
-            data = json.loads(message.data.decode("utf-8"))
+
+            # Decode and parse message data
+            try:
+                data = json.loads(message.data.decode("utf-8"))
+            except json.JSONDecodeError as e:
+                self.logger.error(f"Invalid JSON in message: {e}")
+                message.ack()  # Acknowledge invalid messages to remove them from the queue
+                return
+
+            # Validate message structure
             symbol = data.get("symbol")
+            required_fields = ["timestamp", "open", "high", "low", "close", "volume"]
 
             if not symbol or symbol not in STOCK_CONFIGS:
                 self.logger.warning(f"Invalid symbol in message: {symbol}")
                 message.ack()
                 return
 
+            if not all(field in data for field in required_fields):
+                self.logger.warning(f"Missing required fields in message for {symbol}")
+                message.ack()
+                return
+
+            # Process valid message
             if self.process_and_load_data(data, symbol):
                 message.ack()
                 self.logger.debug("Message acknowledged")
