@@ -231,12 +231,47 @@ class BigQueryLoader:
                     f"Attempting to load batch of {batch_size} records for {symbol}"
                 )
 
-                # Create raw DataFrame without any modifications
+                # Create raw DataFrame and properly handle timestamp
                 raw_df = pd.DataFrame(self.batch_data[symbol])
+                raw_df["timestamp"] = pd.to_datetime(raw_df["timestamp"])
+
+                # Ensure data types are correct for BigQuery
+                raw_df = raw_df.astype(
+                    {
+                        "symbol": str,
+                        "open": float,
+                        "high": float,
+                        "low": float,
+                        "close": float,
+                        "volume": int,
+                    }
+                )
+
+                # Select only raw columns in correct order
                 raw_df = raw_df[self.raw_columns]
 
-                # Create processed DataFrame
+                # Process data for processed table
                 processed_df = self.preprocessor.process_stock_data(raw_df.copy())
+
+                # Ensure processed data types are correct
+                processed_df["date"] = pd.to_datetime(processed_df["date"]).dt.date
+                processed_df["time"] = pd.to_datetime(
+                    processed_df["time"], format="%H:%M:%S"
+                ).dt.time
+                processed_df = processed_df.astype(
+                    {
+                        "symbol": str,
+                        "open": float,
+                        "high": float,
+                        "low": float,
+                        "close": float,
+                        "volume": int,
+                        "ma5": float,
+                        "cma": float,
+                        "eod_ma5": float,
+                    }
+                )
+
                 processed_df = processed_df[self.processed_columns]
 
                 # Configure job
@@ -244,7 +279,7 @@ class BigQueryLoader:
                     write_disposition=bigquery.WriteDisposition.WRITE_APPEND
                 )
 
-                # Load raw data first
+                # Load raw data
                 raw_table_id = f"{GCP_CONFIG['PROJECT_ID']}.{GCP_CONFIG['DATASET_NAME']}.{STOCK_CONFIGS[symbol]['table_name']}_raw"
                 raw_success = self.load_batch_with_retry(
                     raw_df, raw_table_id, job_config
