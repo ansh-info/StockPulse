@@ -237,7 +237,7 @@ class BigQueryLoader:
                     f"Attempting to load batch of {batch_size} records for {symbol}"
                 )
 
-                # Create raw DataFrame preserving original column names from API
+                # For raw data - preserve exact format from API
                 raw_records = []
                 for record in self.batch_data[symbol]:
                     raw_record = {
@@ -251,30 +251,12 @@ class BigQueryLoader:
                     raw_records.append(raw_record)
 
                 raw_df = pd.DataFrame(raw_records)
-                raw_df["Timestamp"] = pd.to_datetime(raw_df["Timestamp"])
+                # Sort by timestamp in descending order to match API format
+                raw_df = raw_df.sort_values("Timestamp", ascending=False)
+                # Remove any potential duplicates while preserving order
+                raw_df = raw_df.drop_duplicates(subset=["Timestamp"], keep="first")
 
-                # For processed data, create a separate DataFrame with our standard format
-                processed_records = []
-                for record in self.batch_data[symbol]:
-                    proc_record = {
-                        "timestamp": record["timestamp"],
-                        "symbol": symbol,
-                        "open": float(record["open"]),
-                        "high": float(record["high"]),
-                        "low": float(record["low"]),
-                        "close": float(record["close"]),
-                        "volume": int(record["volume"]),
-                    }
-                    processed_records.append(proc_record)
-
-                proc_df = pd.DataFrame(processed_records)
-                proc_df["timestamp"] = pd.to_datetime(proc_df["timestamp"])
-
-                # Process data for processed table
-                processed_df = self.preprocessor.process_stock_data(proc_df.copy())
-                processed_df = processed_df[self.processed_columns]
-
-                # Configure jobs
+                # Configure raw data job
                 raw_job_config = bigquery.LoadJobConfig(
                     write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
                     schema=[
@@ -287,10 +269,6 @@ class BigQueryLoader:
                     ],
                 )
 
-                processed_job_config = bigquery.LoadJobConfig(
-                    write_disposition=bigquery.WriteDisposition.WRITE_APPEND
-                )
-
                 # Load raw data
                 raw_table_id = f"{GCP_CONFIG['PROJECT_ID']}.{GCP_CONFIG['DATASET_NAME']}.{STOCK_CONFIGS[symbol]['table_name']}_raw"
                 raw_success = self.load_batch_with_retry(
@@ -298,10 +276,24 @@ class BigQueryLoader:
                 )
 
                 if raw_success:
+                    # For processed data - create a copy for preprocessing
+                    proc_df = raw_df.copy()
+                    # Convert to lowercase for processing
+                    proc_df.columns = proc_df.columns.str.lower()
+                    proc_df["symbol"] = symbol
+
+                    # Process the data
+                    processed_df = self.preprocessor.process_stock_data(proc_df)
+                    processed_df = processed_df[self.processed_columns]
+
                     # Load processed data
                     processed_table_id = f"{GCP_CONFIG['PROJECT_ID']}.{GCP_CONFIG['DATASET_NAME']}.{STOCK_CONFIGS[symbol]['table_name']}_processed"
                     processed_success = self.load_batch_with_retry(
-                        processed_df, processed_table_id, processed_job_config
+                        processed_df,
+                        processed_table_id,
+                        bigquery.LoadJobConfig(
+                            write_disposition=bigquery.WriteDisposition.WRITE_APPEND
+                        ),
                     )
 
                     if processed_success:
