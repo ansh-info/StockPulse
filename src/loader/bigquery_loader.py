@@ -28,16 +28,36 @@ class BigQueryLoader:
         self.raw_tables = {}
         self.processed_tables = {}
 
-        # Initialize batch processing attributes with larger batch size
-        self.batch_size = 200
-        self.batch_timeout = 120
+        # Initialize batch processing attributes
+        self.batch_size = 100  # Reduced for better rate limit handling
+        self.batch_timeout = 180  # Increased for better batching
+        self.min_batch_interval = 2.0  # Minimum seconds between batches
         self.batch_data = defaultdict(list)
         self.last_load_time = defaultdict(float)
 
         # Initialize retry parameters
         self.max_retries = 5
-        self.initial_retry_delay = 1
+        self.initial_retry_delay = 2
         self.max_retry_delay = 32
+
+        # Define column schemas
+        self.raw_columns = [
+            "timestamp",
+            "symbol",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+        ]
+        self.processed_columns = self.raw_columns + [
+            "daily_return",
+            "ma7",
+            "ma20",
+            "volatility",
+            "volume_ma5",
+            "momentum",
+        ]
 
         # Setup infrastructure
         self.logger.info("Setting up BigQuery infrastructure...")
@@ -48,22 +68,16 @@ class BigQueryLoader:
     def setup_logging(self):
         """Configure logging to both file and console"""
         try:
-            # Create logs directory if it doesn't exist
             log_dir = Path("logs")
             log_dir.mkdir(exist_ok=True)
 
-            # Create log filename with timestamp
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             log_file = log_dir / f"bigquery_loader_{timestamp}.log"
 
-            # Configure logger
             self.logger = logging.getLogger("BigQueryLoader")
             self.logger.setLevel(logging.INFO)
-
-            # Clear any existing handlers
             self.logger.handlers = []
 
-            # File handler with timestamp
             file_handler = logging.FileHandler(log_file)
             file_handler.setLevel(logging.INFO)
             file_formatter = logging.Formatter(
@@ -71,7 +85,6 @@ class BigQueryLoader:
             )
             file_handler.setFormatter(file_formatter)
 
-            # Console handler
             console_handler = logging.StreamHandler()
             console_handler.setLevel(logging.INFO)
             console_formatter = logging.Formatter(
@@ -79,7 +92,6 @@ class BigQueryLoader:
             )
             console_handler.setFormatter(console_formatter)
 
-            # Add both handlers to the logger
             self.logger.addHandler(file_handler)
             self.logger.addHandler(console_handler)
 
@@ -99,13 +111,24 @@ class BigQueryLoader:
         """Load data to BigQuery with exponential backoff retry"""
         for attempt in range(self.max_retries):
             try:
+                # Verify DataFrame columns before loading
+                df = df.copy()
+
+                # Log column information for debugging
+                self.logger.debug(
+                    f"Attempting to load DataFrame with columns: {df.columns.tolist()}"
+                )
+
                 job = self.client.load_table_from_dataframe(
                     df, table_id, job_config=job_config
                 )
                 job.result()
                 return True
+
             except Exception as e:
-                if "rate limits exceeded" in str(e).lower():
+                error_msg = str(e).lower()
+
+                if "rate limits exceeded" in error_msg:
                     if attempt < self.max_retries - 1:
                         delay = self.exponential_backoff(attempt)
                         self.logger.warning(
@@ -115,9 +138,17 @@ class BigQueryLoader:
                         time.sleep(delay)
                     else:
                         self.logger.error(
-                            f"Failed to load batch after {self.max_retries} attempts: {e}"
+                            f"Failed after {self.max_retries} attempts: {e}"
                         )
                         return False
+                elif "schema does not match" in error_msg:
+                    self.logger.error(f"Schema mismatch error: {e}")
+                    table = self.client.get_table(table_id)
+                    self.logger.error(f"DataFrame columns: {df.columns.tolist()}")
+                    self.logger.error(
+                        f"BigQuery schema: {[field.name for field in table.schema]}"
+                    )
+                    return False
                 else:
                     self.logger.error(f"Error loading batch: {e}")
                     return False
@@ -213,9 +244,13 @@ class BigQueryLoader:
             return False
 
         current_time = time.time()
-        timeout_reached = (
-            current_time - self.last_load_time[symbol]
-        ) > self.batch_timeout
+        time_since_last_load = current_time - self.last_load_time[symbol]
+
+        # Check if minimum interval has passed
+        if time_since_last_load < self.min_batch_interval:
+            return False
+
+        timeout_reached = time_since_last_load > self.batch_timeout
         batch_full = len(self.batch_data[symbol]) >= self.batch_size
 
         return timeout_reached or batch_full
@@ -231,26 +266,37 @@ class BigQueryLoader:
                 f"Attempting to load batch of {batch_size} records for {symbol}"
             )
 
+            # Create raw DataFrame and ensure columns match schema
             raw_df = pd.DataFrame(self.batch_data[symbol])
             raw_df["timestamp"] = pd.to_datetime(raw_df["timestamp"])
+            raw_df = raw_df[self.raw_columns]  # Ensure column order matches schema
 
-            df_for_processing = raw_df.copy()
+            # Process data for the processed table
             processed_df = self.preprocessor.process_stock_data(
-                df_for_processing,
+                raw_df.copy(),
                 resample_freq=None,
                 fill_gaps=True,
                 calculate_indicators=True,
             )
-            processed_df = processed_df.reset_index()
+
+            # Ensure processed columns match schema
+            processed_df = processed_df[self.processed_columns]
 
             job_config = bigquery.LoadJobConfig(
                 write_disposition=bigquery.WriteDisposition.WRITE_APPEND
             )
 
+            # Add delay to respect rate limits
+            time.sleep(2)
+
+            # Load raw data
             raw_table_id = f"{GCP_CONFIG['PROJECT_ID']}.{GCP_CONFIG['DATASET_NAME']}.{STOCK_CONFIGS[symbol]['table_name']}_raw"
             raw_success = self.load_batch_with_retry(raw_df, raw_table_id, job_config)
 
             if raw_success:
+                # Add delay before processing table update
+                time.sleep(2)
+
                 processed_table_id = f"{GCP_CONFIG['PROJECT_ID']}.{GCP_CONFIG['DATASET_NAME']}.{STOCK_CONFIGS[symbol]['table_name']}_processed"
                 processed_success = self.load_batch_with_retry(
                     processed_df, processed_table_id, job_config
@@ -290,7 +336,7 @@ class BigQueryLoader:
     def callback(self, message):
         """Handle incoming Pub/Sub messages"""
         try:
-            self.logger.debug("\nReceived new message...")
+            self.logger.debug("Received new message...")
             data = json.loads(message.data.decode("utf-8"))
             symbol = data.get("symbol")
 
