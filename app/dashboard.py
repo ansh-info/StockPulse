@@ -1,4 +1,3 @@
-# dashboard.py
 from datetime import datetime, timedelta
 
 import pandas as pd
@@ -25,24 +24,47 @@ class StockDashboard:
         WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
         ORDER BY timestamp
         """
-        return pandas_gbq.read_gbq(
-            query, project_id=GCP_CONFIG["PROJECT_ID"], progress_bar_type=None
-        )
+        try:
+            data = pandas_gbq.read_gbq(
+                query, project_id=GCP_CONFIG["PROJECT_ID"], progress_bar_type=None
+            )
+            if data.empty:
+                raise ValueError(
+                    f"No data available for {symbol} in the last {days} days"
+                )
+            return data
+        except Exception as e:
+            st.error(f"Error fetching data for {symbol}: {str(e)}")
+            return pd.DataFrame()
 
-    def calculate_metrics(self, symbol, data):
+    def calculate_metrics(self, data):
         """Calculate key metrics for the stock"""
-        latest = data.iloc[-1]
-        prev_close = data.iloc[-2]["close"]
+        if data.empty:
+            return None
 
-        return {
-            "current_price": latest["close"],
-            "day_change": (latest["close"] - prev_close) / prev_close * 100,
-            "day_volume": latest["volume"],
-            "ma7": latest["ma7"],
-            "ma20": latest["ma20"],
-            "volatility": latest["volatility"],
-            "momentum": latest["momentum"],
-        }
+        try:
+            latest = data.iloc[-1] if len(data) > 0 else None
+            prev_close = data.iloc[-2]["close"] if len(data) > 1 else latest["close"]
+
+            if latest is None:
+                return None
+
+            return {
+                "current_price": latest["close"],
+                "day_change": (
+                    (latest["close"] - prev_close) / prev_close * 100
+                    if prev_close
+                    else 0
+                ),
+                "day_volume": latest["volume"],
+                "ma7": latest.get("ma7", 0),
+                "ma20": latest.get("ma20", 0),
+                "volatility": latest.get("volatility", 0),
+                "momentum": latest.get("momentum", 0),
+            }
+        except Exception as e:
+            st.warning(f"Error calculating metrics: {str(e)}")
+            return None
 
 
 def main():
@@ -93,146 +115,163 @@ def main():
         ["Technical Analysis", "Volume Analysis", "Comparative Analysis"],
     )
 
+    # Main content
+    st.title(f"📈 Advanced Stock Market Analysis - {selected_stock}")
+
     try:
         # Get data
         processed_data = dashboard.get_stock_data(
             selected_stock, selected_days, "processed"
         )
 
-        # Main content
-        st.title(f"📈 Advanced Stock Market Analysis - {selected_stock}")
+        if processed_data.empty:
+            st.warning(
+                f"No data available for {selected_stock} in the selected time range."
+            )
+            return
 
         # Key metrics row
-        metrics = dashboard.calculate_metrics(selected_stock, processed_data)
-        col1, col2, col3, col4 = st.columns(4)
+        metrics = dashboard.calculate_metrics(processed_data)
 
-        with col1:
-            st.metric(
-                "Current Price",
-                f"${metrics['current_price']:.2f}",
-                f"{metrics['day_change']:.2f}%",
-            )
-        with col2:
-            st.metric("Volume", f"{metrics['day_volume']:,}")
-        with col3:
-            st.metric("MA7", f"${metrics['ma7']:.2f}")
-        with col4:
-            st.metric("Volatility", f"{metrics['volatility']:.2f}%")
-
-        if view_type == "Technical Analysis":
-            # Technical Analysis View
-            st.subheader("Technical Analysis")
-
-            # Candlestick with MA
-            fig = go.Figure()
-
-            # Candlestick
-            fig.add_trace(
-                go.Candlestick(
-                    x=processed_data["timestamp"],
-                    open=processed_data["open"],
-                    high=processed_data["high"],
-                    low=processed_data["low"],
-                    close=processed_data["close"],
-                    name="OHLC",
-                )
-            )
-
-            # Add MA lines
-            fig.add_trace(
-                go.Scatter(
-                    x=processed_data["timestamp"],
-                    y=processed_data["ma7"],
-                    name="MA7",
-                    line=dict(color="blue", width=1),
-                )
-            )
-
-            fig.add_trace(
-                go.Scatter(
-                    x=processed_data["timestamp"],
-                    y=processed_data["ma20"],
-                    name="MA20",
-                    line=dict(color="orange", width=1),
-                )
-            )
-
-            fig.update_layout(
-                title="Price Movement with Moving Averages",
-                yaxis_title="Price (USD)",
-                xaxis_title="Date",
-                height=600,
-                template="plotly_white",
-            )
-
-            st.plotly_chart(fig, use_container_width=True)
-
-            # Technical Indicators
-            col1, col2 = st.columns(2)
+        if metrics:
+            col1, col2, col3, col4 = st.columns(4)
 
             with col1:
-                # Daily Returns
-                fig_returns = px.line(
-                    processed_data,
-                    x="timestamp",
-                    y="daily_return",
-                    title="Daily Returns (%)",
+                st.metric(
+                    "Current Price",
+                    f"${metrics['current_price']:.2f}",
+                    f"{metrics['day_change']:.2f}%",
                 )
-                st.plotly_chart(fig_returns, use_container_width=True)
-
             with col2:
-                # Momentum
-                fig_momentum = px.line(
-                    processed_data, x="timestamp", y="momentum", title="Price Momentum"
+                st.metric("Volume", f"{metrics['day_volume']:,}")
+            with col3:
+                st.metric("MA7", f"${metrics['ma7']:.2f}")
+            with col4:
+                st.metric("Volatility", f"{metrics['volatility']:.2f}%")
+
+        if view_type == "Technical Analysis":
+            st.subheader("Technical Analysis")
+
+            if len(processed_data) > 0:
+                # Candlestick with MA
+                fig = go.Figure()
+
+                # Candlestick
+                fig.add_trace(
+                    go.Candlestick(
+                        x=processed_data["timestamp"],
+                        open=processed_data["open"],
+                        high=processed_data["high"],
+                        low=processed_data["low"],
+                        close=processed_data["close"],
+                        name="OHLC",
+                    )
                 )
-                st.plotly_chart(fig_momentum, use_container_width=True)
+
+                # Add MA lines if they exist
+                if "ma7" in processed_data.columns:
+                    fig.add_trace(
+                        go.Scatter(
+                            x=processed_data["timestamp"],
+                            y=processed_data["ma7"],
+                            name="MA7",
+                            line=dict(color="blue", width=1),
+                        )
+                    )
+
+                if "ma20" in processed_data.columns:
+                    fig.add_trace(
+                        go.Scatter(
+                            x=processed_data["timestamp"],
+                            y=processed_data["ma20"],
+                            name="MA20",
+                            line=dict(color="orange", width=1),
+                        )
+                    )
+
+                fig.update_layout(
+                    title="Price Movement with Moving Averages",
+                    yaxis_title="Price (USD)",
+                    xaxis_title="Date",
+                    height=600,
+                    template="plotly_white",
+                )
+
+                st.plotly_chart(fig, use_container_width=True)
+
+                # Technical Indicators
+                if all(
+                    col in processed_data.columns
+                    for col in ["daily_return", "momentum"]
+                ):
+                    col1, col2 = st.columns(2)
+
+                    with col1:
+                        # Daily Returns
+                        fig_returns = px.line(
+                            processed_data,
+                            x="timestamp",
+                            y="daily_return",
+                            title="Daily Returns (%)",
+                        )
+                        st.plotly_chart(fig_returns, use_container_width=True)
+
+                    with col2:
+                        # Momentum
+                        fig_momentum = px.line(
+                            processed_data,
+                            x="timestamp",
+                            y="momentum",
+                            title="Price Momentum",
+                        )
+                        st.plotly_chart(fig_momentum, use_container_width=True)
 
         elif view_type == "Volume Analysis":
-            # Volume Analysis View
             st.subheader("Volume Analysis")
 
-            # Volume chart with MA
-            fig_volume = go.Figure()
+            if len(processed_data) > 0:
+                # Volume chart with MA
+                fig_volume = go.Figure()
 
-            fig_volume.add_trace(
-                go.Bar(
-                    x=processed_data["timestamp"],
-                    y=processed_data["volume"],
-                    name="Volume",
-                    marker_color="lightblue",
+                fig_volume.add_trace(
+                    go.Bar(
+                        x=processed_data["timestamp"],
+                        y=processed_data["volume"],
+                        name="Volume",
+                        marker_color="lightblue",
+                    )
                 )
-            )
 
-            fig_volume.add_trace(
-                go.Scatter(
-                    x=processed_data["timestamp"],
-                    y=processed_data["volume_ma5"],
-                    name="Volume MA5",
-                    line=dict(color="red", width=2),
+                if "volume_ma5" in processed_data.columns:
+                    fig_volume.add_trace(
+                        go.Scatter(
+                            x=processed_data["timestamp"],
+                            y=processed_data["volume_ma5"],
+                            name="Volume MA5",
+                            line=dict(color="red", width=2),
+                        )
+                    )
+
+                fig_volume.update_layout(
+                    title="Trading Volume Analysis",
+                    yaxis_title="Volume",
+                    xaxis_title="Date",
+                    height=500,
+                    template="plotly_white",
                 )
-            )
 
-            fig_volume.update_layout(
-                title="Trading Volume Analysis",
-                yaxis_title="Volume",
-                xaxis_title="Date",
-                height=500,
-                template="plotly_white",
-            )
+                st.plotly_chart(fig_volume, use_container_width=True)
 
-            st.plotly_chart(fig_volume, use_container_width=True)
-
-            # Volume distribution
-            fig_vol_dist = px.histogram(
-                processed_data, x="volume", nbins=50, title="Volume Distribution"
-            )
-            st.plotly_chart(fig_vol_dist, use_container_width=True)
+                # Volume distribution
+                fig_vol_dist = px.histogram(
+                    processed_data, x="volume", nbins=50, title="Volume Distribution"
+                )
+                st.plotly_chart(fig_vol_dist, use_container_width=True)
 
         else:
             # Comparative Analysis View
             st.subheader("Comparative Analysis")
 
-            # Get data for all stocks
             comparison_df = pd.DataFrame()
 
             for symbol in STOCK_CONFIGS.keys():
@@ -269,9 +308,10 @@ def main():
                 st.plotly_chart(fig_corr, use_container_width=True)
 
         # Additional Analysis Section
-        st.subheader("Statistical Summary")
-        summary_data = processed_data.describe()
-        st.dataframe(summary_data)
+        if len(processed_data) > 0:
+            st.subheader("Statistical Summary")
+            summary_data = processed_data.describe()
+            st.dataframe(summary_data)
 
     except Exception as e:
         st.error(f"An error occurred: {str(e)}")
