@@ -24,6 +24,25 @@ class StockDataPreprocessor:
         self.max_price_change = 10.0  # Maximum allowed price change (%)
         self.min_volume = 0  # Minimum allowed volume
 
+        # Define expected columns and their order
+        self.raw_columns = [
+            "timestamp",
+            "symbol",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+        ]
+        self.processed_columns = self.raw_columns + [
+            "daily_return",
+            "ma7",
+            "ma20",
+            "volatility",
+            "volume_ma5",
+            "momentum",
+        ]
+
         self.logger.info("Initialized StockDataPreprocessor")
 
     def setup_logging(self):
@@ -38,7 +57,6 @@ class StockDataPreprocessor:
         self.logger.setLevel(logging.INFO)
 
         if not self.logger.handlers:
-            # File handler
             file_handler = logging.FileHandler(log_file)
             file_handler.setLevel(logging.INFO)
             file_formatter = logging.Formatter(
@@ -46,7 +64,6 @@ class StockDataPreprocessor:
             )
             file_handler.setFormatter(file_formatter)
 
-            # Console handler
             console_handler = logging.StreamHandler()
             console_handler.setLevel(logging.INFO)
             console_formatter = logging.Formatter(
@@ -83,6 +100,13 @@ class StockDataPreprocessor:
             # Make copy to avoid modifying original
             df = df.copy()
 
+            # Ensure timestamp column exists and is datetime
+            if "timestamp" not in df.columns:
+                raise ValueError("DataFrame must contain 'timestamp' column")
+
+            # Convert timestamp to datetime if it's not already
+            df["timestamp"] = pd.to_datetime(df["timestamp"])
+
             # Remove duplicates
             initial_len = len(df)
             df = df.drop_duplicates(subset=["timestamp", "symbol"], keep="first")
@@ -117,6 +141,9 @@ class StockDataPreprocessor:
             # Remove temporary columns
             df = df.drop("price_change", axis=1, errors="ignore")
 
+            # Ensure raw columns are in correct order
+            df = df.reindex(columns=self.raw_columns)
+
             self.logger.info(
                 f"Data validation complete. {len(df)} valid records remaining"
             )
@@ -129,30 +156,20 @@ class StockDataPreprocessor:
     def calculate_technical_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """Calculate technical indicators"""
         try:
-            # Price changes
-            df["daily_return"] = df["close"].pct_change() * 100
+            df = df.copy()
 
-            # Moving averages
+            # Calculate indicators
+            df["daily_return"] = df["close"].pct_change() * 100
             df["ma7"] = df["close"].rolling(window=7, min_periods=1).mean()
             df["ma20"] = df["close"].rolling(window=20, min_periods=1).mean()
-
-            # Volatility (20-period standard deviation of returns)
             df["volatility"] = (
                 df["daily_return"].rolling(window=20, min_periods=1).std()
             )
-
-            # Volume indicators
             df["volume_ma5"] = df["volume"].rolling(window=5, min_periods=1).mean()
-
-            # Momentum (14-period)
             df["momentum"] = df["close"] - df["close"].shift(14)
 
-            # RSI (14-period)
-            delta = df["close"].diff()
-            gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-            loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-            rs = gain / loss
-            df["rsi"] = 100 - (100 / (1 + rs))
+            # Ensure all columns are present and in correct order
+            df = df.reindex(columns=self.processed_columns)
 
             return df
 
@@ -163,8 +180,10 @@ class StockDataPreprocessor:
     def fill_gaps(self, df: pd.DataFrame, max_gap: int = 5) -> pd.DataFrame:
         """Fill gaps in data with intelligent interpolation"""
         try:
+            df = df.copy()
+
             # Sort by timestamp
-            df = df.sort_index()
+            df = df.sort_values("timestamp")
 
             # Forward fill for short gaps (within same trading day)
             df = df.ffill(limit=max_gap)
@@ -194,26 +213,18 @@ class StockDataPreprocessor:
     ) -> pd.DataFrame:
         """
         Process stock data with various transformations and calculations
-
-        Args:
-            df: DataFrame with stock data
-            resample_freq: Frequency for resampling ('1H' for hourly, '1D' for daily, etc.)
-            fill_gaps: Whether to fill gaps in data
-            calculate_indicators: Whether to calculate technical indicators
         """
         try:
             self.logger.info(f"Starting data processing for {len(df)} records")
 
-            # Convert timestamp to datetime and set as index
-            df["timestamp"] = pd.to_datetime(df["timestamp"])
-            df = df.set_index("timestamp")
-
-            # Initial data validation
+            # Validate data first
             df = self.validate_data(df)
 
             # Filter for market hours
+            df["market_hours"] = df["timestamp"].map(self.is_market_hours)
             initial_len = len(df)
-            df = df[df.index.map(self.is_market_hours)]
+            df = df[df["market_hours"]]
+            df = df.drop("market_hours", axis=1)
             filtered_count = initial_len - len(df)
             self.logger.info(
                 f"Filtered out {filtered_count} records outside market hours"
@@ -221,6 +232,7 @@ class StockDataPreprocessor:
 
             # Resample data if frequency specified
             if resample_freq:
+                df = df.set_index("timestamp")
                 df = df.resample(resample_freq).agg(
                     {
                         "open": "first",
@@ -228,8 +240,10 @@ class StockDataPreprocessor:
                         "low": "min",
                         "close": "last",
                         "volume": "sum",
+                        "symbol": "first",
                     }
                 )
+                df = df.reset_index()
 
             # Fill gaps if requested
             if fill_gaps:
@@ -238,6 +252,9 @@ class StockDataPreprocessor:
             # Calculate technical indicators if requested
             if calculate_indicators:
                 df = self.calculate_technical_indicators(df)
+
+            # Ensure all required columns are present and in correct order
+            df = df.reindex(columns=self.processed_columns)
 
             self.logger.info(f"Data processing complete. Final record count: {len(df)}")
             return df
@@ -249,18 +266,26 @@ class StockDataPreprocessor:
     def get_summary_stats(self, df: pd.DataFrame) -> Dict:
         """Calculate summary statistics for the stock data"""
         try:
-            return {
-                "avg_daily_return": df["daily_return"].mean(),
-                "volatility": df["daily_return"].std(),
+            df = df.copy()
+
+            stats = {
+                "avg_daily_return": (
+                    df["daily_return"].mean() if "daily_return" in df.columns else None
+                ),
+                "volatility": (
+                    df["daily_return"].std() if "daily_return" in df.columns else None
+                ),
                 "avg_volume": df["volume"].mean(),
                 "max_price": df["high"].max(),
                 "min_price": df["low"].min(),
                 "price_range": df["high"].max() - df["low"].min(),
-                "avg_rsi": df["rsi"].mean() if "rsi" in df.columns else None,
                 "record_count": len(df),
-                "first_timestamp": df.index.min(),
-                "last_timestamp": df.index.max(),
+                "first_timestamp": df["timestamp"].min(),
+                "last_timestamp": df["timestamp"].max(),
             }
+
+            return stats
+
         except Exception as e:
             self.logger.error(f"Error calculating summary stats: {e}")
             raise
