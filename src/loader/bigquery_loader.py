@@ -362,12 +362,12 @@ class BigQueryLoader:
         try:
             self.logger.debug("Received new message...")
 
-            # Validate message data
+            # Decode and parse message data
             try:
                 data = json.loads(message.data.decode("utf-8"))
             except json.JSONDecodeError as e:
                 self.logger.error(f"Invalid JSON in message: {e}")
-                message.ack()  # Acknowledge invalid messages
+                message.ack()  # Acknowledge invalid messages to remove them from the queue
                 return
 
             # Validate message structure
@@ -380,17 +380,17 @@ class BigQueryLoader:
                 return
 
             if not all(field in data for field in required_fields):
-                self.logger.warning(f"Missing required fields in message")
+                self.logger.warning(f"Missing required fields in message for {symbol}")
                 message.ack()
                 return
 
             # Process valid message
             if self.process_and_load_data(data, symbol):
                 message.ack()
-                self.logger.debug(f"Successfully processed message for {symbol}")
+                self.logger.debug("Message acknowledged")
             else:
                 message.nack()
-                self.logger.warning(f"Failed to process message for {symbol}")
+                self.logger.warning("Message not acknowledged due to processing error")
 
         except Exception as e:
             self.logger.error(f"Error in callback: {e}")
@@ -406,7 +406,6 @@ class BigQueryLoader:
 
 
 def main():
-    """Main function to start the BigQuery loader"""
     loader = BigQueryLoader()
     subscriber = pubsub_v1.SubscriberClient()
     subscription_path = subscriber.subscription_path(
@@ -417,7 +416,6 @@ def main():
     loader.logger.info(f"Starting to listen for messages on {subscription_path}")
 
     try:
-        # This will block until the subscriber exits
         streaming_pull_future.result()
     except KeyboardInterrupt:
         streaming_pull_future.cancel()
@@ -425,5 +423,7 @@ def main():
         loader.logger.info("Stopped listening for messages")
     except Exception as e:
         loader.logger.error(f"Unexpected error: {e}")
-        streaming_pull_future.cancel()
-        loader.cleanup()
+
+
+if __name__ == "__main__":
+    main()
