@@ -1,11 +1,12 @@
 import logging
-from datetime import datetime, time, timedelta
+from datetime import datetime, time
 from pathlib import Path
 from typing import Dict, Optional
 
 import numpy as np
 import pandas as pd
 import pytz
+from pandas.tseries.holiday import USFederalHolidayCalendar
 
 
 class StockDataPreprocessor:
@@ -20,12 +21,11 @@ class StockDataPreprocessor:
         # Initialize timezone
         self.et_timezone = pytz.timezone("US/Eastern")
 
-        # Data quality thresholds
-        self.max_price_change = 10.0  # Maximum allowed price change (%)
-        self.min_volume = 0  # Minimum allowed volume
+        # Initialize holiday calendar
+        self.holiday_calendar = USFederalHolidayCalendar()
 
-        # Define expected columns and their order
-        self.raw_columns = [
+        # Define expected columns
+        self.required_columns = [
             "timestamp",
             "symbol",
             "open",
@@ -34,19 +34,20 @@ class StockDataPreprocessor:
             "close",
             "volume",
         ]
-        self.processed_columns = self.raw_columns + [
-            "daily_return",
-            "ma7",
-            "ma20",
-            "volatility",
-            "volume_ma5",
-            "momentum",
+
+        # Define processed columns
+        self.processed_columns = self.required_columns + [
+            "date",
+            "time",
+            "ma5",  # 5-period moving average
+            "cma",  # Cumulative moving average
+            "eod_ma5",  # End-of-day 5-period moving average
         ]
 
-        self.logger.info("Initialized StockDataPreprocessor")
+        self.logger.info("Initialized Improved Stock Data Preprocessor")
 
     def setup_logging(self):
-        """Configure logging for preprocessor"""
+        """Configure logging with both file and console handlers"""
         log_dir = Path("logs")
         log_dir.mkdir(exist_ok=True)
 
@@ -57,6 +58,7 @@ class StockDataPreprocessor:
         self.logger.setLevel(logging.INFO)
 
         if not self.logger.handlers:
+            # File handler
             file_handler = logging.FileHandler(log_file)
             file_handler.setLevel(logging.INFO)
             file_formatter = logging.Formatter(
@@ -64,6 +66,7 @@ class StockDataPreprocessor:
             )
             file_handler.setFormatter(file_formatter)
 
+            # Console handler
             console_handler = logging.StreamHandler()
             console_handler.setLevel(logging.INFO)
             console_formatter = logging.Formatter(
@@ -75,7 +78,9 @@ class StockDataPreprocessor:
             self.logger.addHandler(console_handler)
 
     def is_market_hours(self, timestamp: pd.Timestamp) -> bool:
-        """Check if timestamp is within market hours"""
+        """
+        Check if timestamp is within market hours, considering holidays
+        """
         try:
             # Convert to ET if not already
             if timestamp.tz is None:
@@ -83,6 +88,11 @@ class StockDataPreprocessor:
             elif timestamp.tz != self.et_timezone:
                 timestamp = timestamp.tz_convert(self.et_timezone)
 
+            # Check if it's a holiday
+            if timestamp.date() in self.holiday_calendar.holidays():
+                return False
+
+            # Check market hours
             current_time = timestamp.time()
             return (
                 self.market_open <= current_time <= self.market_close
@@ -93,199 +103,157 @@ class StockDataPreprocessor:
             return False
 
     def validate_data(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Validate and clean data"""
-        self.logger.info(f"Starting data validation on {len(df)} records")
-
+        """
+        Validate and clean data with improved checks
+        """
         try:
-            # Make copy to avoid modifying original
             df = df.copy()
 
-            # Ensure timestamp column exists and is datetime
-            if "timestamp" not in df.columns:
-                raise ValueError("DataFrame must contain 'timestamp' column")
+            # Ensure required columns exist
+            missing_cols = set(self.required_columns) - set(df.columns)
+            if missing_cols:
+                raise ValueError(f"Missing required columns: {missing_cols}")
 
-            # Convert timestamp to datetime if it's not already
+            # Convert timestamp to datetime
             df["timestamp"] = pd.to_datetime(df["timestamp"])
 
-            # Remove duplicates
-            initial_len = len(df)
-            df = df.drop_duplicates(subset=["timestamp", "symbol"], keep="first")
-            dupes_removed = initial_len - len(df)
-            if dupes_removed > 0:
-                self.logger.warning(f"Removed {dupes_removed} duplicate records")
+            # Add date and time columns
+            df["date"] = df["timestamp"].dt.date
+            df["time"] = df["timestamp"].dt.time
 
-            # Remove records with invalid prices
-            df = df[df["open"] > 0]
-            df = df[df["high"] > 0]
-            df = df[df["low"] > 0]
-            df = df[df["close"] > 0]
+            # Remove exact duplicates
+            df = df.drop_duplicates()
 
-            # Ensure price consistency
+            # Remove records with null values in critical columns
+            critical_cols = ["open", "high", "low", "close", "volume"]
+            df = df.dropna(subset=critical_cols)
+
+            # Basic price and volume validation
+            df = df[df[critical_cols].gt(0).all(axis=1)]
+
+            # Ensure high/low price consistency
             df = df[df["high"] >= df["low"]]
-            df = df[df["open"] >= df["low"]]
-            df = df[df["open"] <= df["high"]]
-            df = df[df["close"] >= df["low"]]
-            df = df[df["close"] <= df["high"]]
 
-            # Remove records with invalid volume
-            df = df[df["volume"] >= self.min_volume]
-
-            # Check for extreme price changes
-            df["price_change"] = abs(df["close"].pct_change() * 100)
-            suspicious_changes = df[df["price_change"] > self.max_price_change]
-            if not suspicious_changes.empty:
-                self.logger.warning(
-                    f"Found {len(suspicious_changes)} records with suspicious price changes"
-                )
-
-            # Remove temporary columns
-            df = df.drop("price_change", axis=1, errors="ignore")
-
-            # Ensure raw columns are in correct order
-            df = df.reindex(columns=self.raw_columns)
-
-            self.logger.info(
-                f"Data validation complete. {len(df)} valid records remaining"
-            )
             return df
 
         except Exception as e:
             self.logger.error(f"Error during data validation: {e}")
             raise
 
-    def calculate_technical_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Calculate technical indicators"""
-        try:
-            df = df.copy()
-
-            # Calculate indicators
-            df["daily_return"] = df["close"].pct_change() * 100
-            df["ma7"] = df["close"].rolling(window=7, min_periods=1).mean()
-            df["ma20"] = df["close"].rolling(window=20, min_periods=1).mean()
-            df["volatility"] = (
-                df["daily_return"].rolling(window=20, min_periods=1).std()
-            )
-            df["volume_ma5"] = df["volume"].rolling(window=5, min_periods=1).mean()
-            df["momentum"] = df["close"] - df["close"].shift(14)
-
-            # Ensure all columns are present and in correct order
-            df = df.reindex(columns=self.processed_columns)
-
-            return df
-
-        except Exception as e:
-            self.logger.error(f"Error calculating technical indicators: {e}")
-            raise
-
-    def fill_gaps(self, df: pd.DataFrame, max_gap: int = 5) -> pd.DataFrame:
-        """Fill gaps in data with intelligent interpolation"""
+    def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Calculate technical indicators with improved methodology
+        """
         try:
             df = df.copy()
 
             # Sort by timestamp
             df = df.sort_values("timestamp")
 
-            # Forward fill for short gaps (within same trading day)
-            df = df.ffill(limit=max_gap)
+            # Calculate 5-period moving average
+            df["ma5"] = df.groupby("symbol")["close"].transform(
+                lambda x: x.rolling(window=5, min_periods=1).mean()
+            )
 
-            # Backward fill remaining gaps
-            df = df.bfill(limit=max_gap)
+            # Calculate cumulative moving average
+            df["cma"] = df.groupby("symbol")["close"].transform(
+                lambda x: x.expanding().mean()
+            )
 
-            # Log any remaining gaps
-            missing_data = df.isnull().sum()
-            if missing_data.any():
-                self.logger.warning(
-                    f"Remaining missing values after gap filling:\n{missing_data}"
-                )
+            # Calculate end-of-day 5-period moving average
+            eod_data = df.groupby(["symbol", "date"])["close"].last().reset_index()
+            eod_data["eod_ma5"] = eod_data.groupby("symbol")["close"].transform(
+                lambda x: x.rolling(window=5, min_periods=1).mean()
+            )
+
+            # Merge end-of-day MA back to main DataFrame
+            df = df.merge(
+                eod_data[["symbol", "date", "eod_ma5"]],
+                on=["symbol", "date"],
+                how="left",
+            )
 
             return df
 
         except Exception as e:
-            self.logger.error(f"Error filling gaps: {e}")
+            self.logger.error(f"Error calculating indicators: {e}")
             raise
 
     def process_stock_data(
-        self,
-        df: pd.DataFrame,
-        resample_freq: Optional[str] = None,
-        fill_gaps: bool = True,
-        calculate_indicators: bool = True,
+        self, df: pd.DataFrame, check_market_hours: bool = True
     ) -> pd.DataFrame:
         """
-        Process stock data with various transformations and calculations
+        Main processing function with improved methodology
         """
         try:
             self.logger.info(f"Starting data processing for {len(df)} records")
 
-            # Validate data first
+            # Validate data
             df = self.validate_data(df)
 
-            # Filter for market hours
-            df["market_hours"] = df["timestamp"].map(self.is_market_hours)
-            initial_len = len(df)
-            df = df[df["market_hours"]]
-            df = df.drop("market_hours", axis=1)
-            filtered_count = initial_len - len(df)
-            self.logger.info(
-                f"Filtered out {filtered_count} records outside market hours"
-            )
+            # Filter for market hours if requested
+            if check_market_hours:
+                df["is_market_hours"] = df["timestamp"].map(self.is_market_hours)
+                df = df[df["is_market_hours"]]
+                df = df.drop("is_market_hours", axis=1)
 
-            # Resample data if frequency specified
-            if resample_freq:
-                df = df.set_index("timestamp")
-                df = df.resample(resample_freq).agg(
-                    {
-                        "open": "first",
-                        "high": "max",
-                        "low": "min",
-                        "close": "last",
-                        "volume": "sum",
-                        "symbol": "first",
-                    }
-                )
-                df = df.reset_index()
+            # Calculate indicators
+            df = self.calculate_indicators(df)
 
-            # Fill gaps if requested
-            if fill_gaps:
-                df = self.fill_gaps(df)
-
-            # Calculate technical indicators if requested
-            if calculate_indicators:
-                df = self.calculate_technical_indicators(df)
-
-            # Ensure all required columns are present and in correct order
+            # Ensure all required columns are present
             df = df.reindex(columns=self.processed_columns)
 
-            self.logger.info(f"Data processing complete. Final record count: {len(df)}")
+            self.logger.info(f"Processing complete. Final record count: {len(df)}")
             return df
 
         except Exception as e:
             self.logger.error(f"Error during data processing: {e}")
             raise
 
-    def get_summary_stats(self, df: pd.DataFrame) -> Dict:
-        """Calculate summary statistics for the stock data"""
+    def get_missing_data_report(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Generate report of missing data points during market hours
+        """
         try:
-            df = df.copy()
+            # Generate expected timestamps
+            start_date = df["date"].min()
+            end_date = df["date"].max()
 
-            stats = {
-                "avg_daily_return": (
-                    df["daily_return"].mean() if "daily_return" in df.columns else None
-                ),
-                "volatility": (
-                    df["daily_return"].std() if "daily_return" in df.columns else None
-                ),
-                "avg_volume": df["volume"].mean(),
-                "max_price": df["high"].max(),
-                "min_price": df["low"].min(),
-                "price_range": df["high"].max() - df["low"].min(),
-                "record_count": len(df),
-                "first_timestamp": df["timestamp"].min(),
-                "last_timestamp": df["timestamp"].max(),
-            }
+            business_days = pd.date_range(
+                start=start_date, end=end_date, freq="B", tz=self.et_timezone
+            )
 
-            return stats
+            # Remove holidays
+            business_days = business_days[
+                ~business_days.date.isin(self.holiday_calendar.holidays())
+            ]
+
+            # Generate all 5-minute intervals
+            market_times = pd.date_range(
+                start=f"{business_days[0].date()} 09:30:00",
+                end=f"{business_days[0].date()} 16:00:00",
+                freq="5min",
+                tz=self.et_timezone,
+            ).time
+
+            # Check for missing data points
+            missing_data = []
+
+            for date in business_days:
+                date_data = df[df["date"] == date.date()]
+                available_times = set(date_data["time"])
+
+                missing_times = [
+                    time for time in market_times if time not in available_times
+                ]
+
+                if missing_times:
+                    missing_data.append(
+                        {"date": date.date(), "missing_times": missing_times}
+                    )
+
+            return pd.DataFrame(missing_data)
 
         except Exception as e:
-            self.logger.error(f"Error calculating summary stats: {e}")
+            self.logger.error(f"Error generating missing data report: {e}")
             raise
