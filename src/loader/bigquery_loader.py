@@ -12,11 +12,27 @@ class BigQueryLoader:
         self.tables = {}
         self.setup_tables()
 
+    def delete_extra_tables(self):
+        """Delete the _raw and _processed tables if they exist"""
+        dataset_ref = f"{GCP_CONFIG['PROJECT_ID']}.{GCP_CONFIG['DATASET_NAME']}"
+
+        for symbol, config in STOCK_CONFIGS.items():
+            base_name = config["table_name"]
+            extra_tables = [f"{base_name}_raw", f"{base_name}_processed"]
+
+            for table_name in extra_tables:
+                table_ref = f"{dataset_ref}.{table_name}"
+                try:
+                    self.client.delete_table(table_ref)
+                    print(f"Deleted extra table: {table_name}")
+                except Exception as e:
+                    print(f"Error deleting table {table_name}: {e}")
+
     def setup_tables(self):
         """Create tables for all configured stocks if they don't exist"""
         dataset_ref = f"{GCP_CONFIG['PROJECT_ID']}.{GCP_CONFIG['DATASET_NAME']}"
 
-        # Updated schema with preprocessing fields
+        # Single schema for both raw and processed data
         schema = [
             bigquery.SchemaField("timestamp", "TIMESTAMP"),
             bigquery.SchemaField("symbol", "STRING"),
@@ -49,26 +65,40 @@ class BigQueryLoader:
 
             table_id = f"{GCP_CONFIG['PROJECT_ID']}.{GCP_CONFIG['DATASET_NAME']}.{STOCK_CONFIGS[symbol]['table_name']}"
 
-            # Updated row structure to include preprocessing fields
+            # Convert timestamp string to datetime
+            timestamp = data["timestamp"]
+
+            # Convert date and time strings to appropriate formats
+            date_str = data.get("date")
+            time_str = data.get("time")
+
             rows_to_insert = [
                 {
-                    "timestamp": data["timestamp"],
+                    "timestamp": timestamp,
                     "symbol": data["symbol"],
-                    "open": data["open"],
-                    "high": data["high"],
-                    "low": data["low"],
-                    "close": data["close"],
-                    "volume": data["volume"],
-                    "date": data.get("date"),  # New field
-                    "time": data.get("time"),  # New field
-                    "moving_average": data.get("moving_average"),  # New field
-                    "cumulative_average": data.get("cumulative_average"),  # New field
+                    "open": float(data["open"]),
+                    "high": float(data["high"]),
+                    "low": float(data["low"]),
+                    "close": float(data["close"]),
+                    "volume": int(data["volume"]),
+                    "date": date_str,
+                    "time": time_str,
+                    "moving_average": (
+                        float(data.get("moving_average", 0))
+                        if data.get("moving_average") is not None
+                        else None
+                    ),
+                    "cumulative_average": (
+                        float(data.get("cumulative_average", 0))
+                        if data.get("cumulative_average") is not None
+                        else None
+                    ),
                 }
             ]
 
             errors = self.client.insert_rows_json(table_id, rows_to_insert)
             if errors == []:
-                print(f"Data inserted successfully for {symbol} at {data['timestamp']}")
+                print(f"Data inserted successfully for {symbol} at {timestamp}")
                 message.ack()
             else:
                 print(f"Errors: {errors}")
@@ -76,11 +106,16 @@ class BigQueryLoader:
 
         except Exception as e:
             print(f"Error processing message: {e}")
+            print(f"Message content: {message.data.decode('utf-8')}")
             message.nack()
 
 
 def main():
     loader = BigQueryLoader()
+
+    # First, clean up extra tables
+    loader.delete_extra_tables()
+
     subscriber = pubsub_v1.SubscriberClient()
     subscription_path = subscriber.subscription_path(
         GCP_CONFIG["PROJECT_ID"], "stock-data-sub"
