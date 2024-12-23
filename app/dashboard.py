@@ -5,7 +5,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
-from google.cloud import bigquery
+from google.cloud import bigquery, bigquery_storage
 
 from config import GCP_CONFIG, STOCK_CONFIGS
 
@@ -13,17 +13,40 @@ from config import GCP_CONFIG, STOCK_CONFIGS
 class StockDashboard:
     def __init__(self):
         self.client = bigquery.Client()
+        self.bqstorage_client = bigquery_storage.BigQueryReadClient()
         self.available_symbols = list(STOCK_CONFIGS.keys())
 
     def load_data(self, symbol: str, days: int = 7) -> pd.DataFrame:
         """Load data from BigQuery for a specific symbol"""
         query = f"""
-        SELECT *
+        SELECT 
+            CAST(timestamp AS STRING) as timestamp_str,
+            symbol,
+            open,
+            high,
+            low,
+            close,
+            volume,
+            CAST(date AS STRING) as date_str,
+            CAST(time AS STRING) as time_str,
+            moving_average,
+            cumulative_average
         FROM `{GCP_CONFIG['PROJECT_ID']}.{GCP_CONFIG['DATASET_NAME']}.{STOCK_CONFIGS[symbol]['table_name']}`
         WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
         ORDER BY timestamp
         """
-        df = self.client.query(query).to_dataframe()
+        df = self.client.query(query).to_dataframe(
+            bqstorage_client=self.bqstorage_client
+        )
+
+        # Convert string timestamps to datetime
+        df["timestamp"] = pd.to_datetime(df["timestamp_str"])
+        df["date"] = pd.to_datetime(df["date_str"])
+        df["time"] = pd.to_datetime(df["time_str"]).dt.time
+
+        # Drop string columns
+        df = df.drop(["timestamp_str", "date_str", "time_str"], axis=1)
+
         return df
 
     def calculate_vwap(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -113,7 +136,6 @@ class StockDashboard:
 
     def create_daily_range_box(self, df: pd.DataFrame) -> go.Figure:
         """Create box plot of daily price ranges"""
-        df["date"] = pd.to_datetime(df["date"])
         df["range"] = df["high"] - df["low"]
         df["week"] = df["date"].dt.strftime("%Y-%U")
 
@@ -139,8 +161,8 @@ class StockDashboard:
 
     def create_volume_heatmap(self, df: pd.DataFrame) -> go.Figure:
         """Create volume heatmap by hour and day"""
-        df["hour"] = pd.to_datetime(df["time"]).dt.hour
-        df["day"] = pd.to_datetime(df["date"]).dt.strftime("%A")
+        df["hour"] = pd.to_datetime(df["time"].astype(str)).dt.hour
+        df["day"] = df["date"].dt.strftime("%A")
 
         volume_pivot = df.pivot_table(
             values="volume", index="day", columns="hour", aggfunc="mean"
@@ -251,6 +273,7 @@ def main():
 
     except Exception as e:
         st.error(f"Error loading data: {str(e)}")
+        st.exception(e)  # This will show the full traceback
 
 
 if __name__ == "__main__":
