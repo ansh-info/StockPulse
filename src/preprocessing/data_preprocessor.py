@@ -1,6 +1,6 @@
 import json
 from datetime import datetime
-from typing import Dict
+from typing import Dict, Optional
 
 import pandas as pd
 from google.cloud import storage
@@ -39,8 +39,10 @@ class DataPreprocessor:
         except Exception as e:
             print(f"Error saving raw CSV to GCS: {e}")
 
-    def process_and_save_data(self, data: Dict, symbol: str, timestamp: str) -> None:
-        """Process raw data and save processed version"""
+    def process_and_save_data(
+        self, data: Dict, symbol: str, timestamp: str
+    ) -> Optional[Dict]:
+        """Process raw data and save processed version, return processed data dictionary"""
         try:
             # Extract time series data
             time_series = data["Time Series (5min)"]
@@ -80,5 +82,18 @@ class DataPreprocessor:
             blob.upload_from_string(df.to_csv(index=False))
             print(f"Saved processed data to GCS: {symbol} - {timestamp}")
 
+            # Create dictionary of processed data indexed by timestamp
+            processed_data = {
+                "date": df.set_index("timestamp")["date"].astype(str).to_dict(),
+                "time": df.set_index("timestamp")["time"].astype(str).to_dict(),
+                "moving_average": df.set_index("timestamp")["moving_average"].to_dict(),
+                "cumulative_average": df.set_index("timestamp")[
+                    "cumulative_average"
+                ].to_dict(),
+            }
+
+            return processed_data
+
         except Exception as e:
             print(f"Error processing and saving data: {e}")
+            return None
