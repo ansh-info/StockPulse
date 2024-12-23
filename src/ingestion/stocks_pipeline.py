@@ -23,47 +23,44 @@ class StockDataPipeline:
     def save_to_gcs(self, data: Dict, symbol: str, timestamp: str) -> None:
         """Save raw data to Google Cloud Storage"""
         try:
-            # Save raw JSON
             bucket = self.storage_client.bucket(GCP_CONFIG["BUCKET_NAME"])
             blob = bucket.blob(f"raw-data/{symbol}/{timestamp}.json")
             blob.upload_from_string(json.dumps(data))
             print(f"Saved raw JSON to GCS: {symbol} - {timestamp}")
-
-            # Save raw CSV and processed data
-            self.preprocessor.save_raw_csv(data, symbol, timestamp)
-            processed_data = self.preprocessor.process_and_save_data(
-                data, symbol, timestamp
-            )
-            return processed_data
-
         except Exception as e:
             print(f"Error saving to GCS: {e}")
-            return None
 
-    def publish_to_pubsub(self, raw_record: Dict, processed_data: Dict) -> None:
-        """Publish record to Pub/Sub with processed data"""
+    def publish_to_pubsub(
+        self, timestamp: str, symbol: str, values: Dict, processed_data: Dict
+    ) -> None:
+        """Publish record to Pub/Sub"""
         try:
             # Combine raw and processed data
             record = {
-                "timestamp": raw_record["timestamp"],
-                "symbol": raw_record["symbol"],
-                "open": float(raw_record["open"]),
-                "high": float(raw_record["high"]),
-                "low": float(raw_record["low"]),
-                "close": float(raw_record["close"]),
-                "volume": int(raw_record["volume"]),
-                "date": processed_data.get("date"),
-                "time": processed_data.get("time"),
-                "moving_average": processed_data.get("moving_average"),
-                "cumulative_average": processed_data.get("cumulative_average"),
+                "timestamp": timestamp,
+                "symbol": symbol,
+                "open": float(values["1. open"]),
+                "high": float(values["2. high"]),
+                "low": float(values["3. low"]),
+                "close": float(values["4. close"]),
+                "volume": int(values["5. volume"]),
+                "date": processed_data.get(timestamp, {}).get("date"),
+                "time": processed_data.get(timestamp, {}).get("time"),
+                "moving_average": processed_data.get(timestamp, {}).get(
+                    "moving_average"
+                ),
+                "cumulative_average": processed_data.get(timestamp, {}).get(
+                    "cumulative_average"
+                ),
             }
 
             message = json.dumps(record).encode("utf-8")
             future = self.publisher.publish(self.topic_path, data=message)
             message_id = future.result()
-            print(f"Published message {message_id} for {record['symbol']}")
+            print(f"Published message {message_id} for {symbol} at {timestamp}")
         except Exception as e:
             print(f"Error publishing to Pub/Sub: {e}")
+            print(f"Record content: {record}")
 
     def fetch_stock_data(self, symbol: str, config: Dict) -> None:
         """Fetch and process data for a single stock"""
@@ -79,35 +76,15 @@ class StockDataPipeline:
                 time_series = data["Time Series (5min)"]
                 current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-                # Save raw data and get processed data
-                processed_data = self.save_to_gcs(data, symbol, current_time)
+                # Save raw data to GCS
+                self.save_to_gcs(data, symbol, current_time)
 
-                if processed_data:
-                    # Process and publish each data point
-                    for timestamp, values in time_series.items():
-                        raw_record = {
-                            "timestamp": timestamp,
-                            "symbol": symbol,
-                            "open": values["1. open"],
-                            "high": values["2. high"],
-                            "low": values["3. low"],
-                            "close": values["4. close"],
-                            "volume": values["5. volume"],
-                        }
+                # Preprocess the time series data
+                processed_data = self.preprocessor.preprocess_time_series(time_series)
 
-                        # Get processed data for this timestamp
-                        timestamp_processed_data = {
-                            "date": processed_data["date"].get(timestamp),
-                            "time": processed_data["time"].get(timestamp),
-                            "moving_average": processed_data["moving_average"].get(
-                                timestamp
-                            ),
-                            "cumulative_average": processed_data[
-                                "cumulative_average"
-                            ].get(timestamp),
-                        }
-
-                        self.publish_to_pubsub(raw_record, timestamp_processed_data)
+                # Process and publish each data point
+                for timestamp, values in time_series.items():
+                    self.publish_to_pubsub(timestamp, symbol, values, processed_data)
 
                 print(f"Successfully processed data for {symbol}")
             else:
@@ -115,6 +92,7 @@ class StockDataPipeline:
 
         except Exception as e:
             print(f"Error processing {symbol}: {e}")
+            print(f"Full error details: {str(e)}")
 
         # Add delay to respect rate limits
         time.sleep(12)  # Alpha Vantage free tier allows 5 calls per minute
