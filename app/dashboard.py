@@ -20,15 +20,15 @@ class StockDashboard:
         """Load data from BigQuery for a specific symbol"""
         query = f"""
         SELECT 
-            CAST(timestamp AS STRING) as timestamp_str,
+            FORMAT_TIMESTAMP('%Y-%m-%d %H:%M:%S', timestamp) as timestamp_str,
             symbol,
             open,
             high,
             low,
             close,
             volume,
-            CAST(date AS STRING) as date_str,
-            CAST(time AS STRING) as time_str,
+            FORMAT_DATE('%Y-%m-%d', CAST(date AS DATE)) as date_str,
+            FORMAT_TIME('%H:%M:%S', CAST(time AS TIME)) as time_str,
             moving_average,
             cumulative_average
         FROM `{GCP_CONFIG['PROJECT_ID']}.{GCP_CONFIG['DATASET_NAME']}.{STOCK_CONFIGS[symbol]['table_name']}`
@@ -39,10 +39,12 @@ class StockDashboard:
             bqstorage_client=self.bqstorage_client
         )
 
-        # Convert string timestamps to datetime
-        df["timestamp"] = pd.to_datetime(df["timestamp_str"])
-        df["date"] = pd.to_datetime(df["date_str"])
-        df["time"] = pd.to_datetime(df["time_str"]).dt.time
+        # Convert timestamps with explicit formats
+        df["timestamp"] = pd.to_datetime(
+            df["timestamp_str"], format="%Y-%m-%d %H:%M:%S"
+        )
+        df["date"] = pd.to_datetime(df["date_str"], format="%Y-%m-%d")
+        df["time"] = pd.to_datetime(df["time_str"], format="%H:%M:%S").dt.time
 
         # Drop string columns
         df = df.drop(["timestamp_str", "date_str", "time_str"], axis=1)
@@ -161,7 +163,8 @@ class StockDashboard:
 
     def create_volume_heatmap(self, df: pd.DataFrame) -> go.Figure:
         """Create volume heatmap by hour and day"""
-        df["hour"] = pd.to_datetime(df["time"].astype(str)).dt.hour
+        # Convert time objects to hour integers directly
+        df["hour"] = df["time"].apply(lambda x: x.hour)
         df["day"] = df["date"].dt.strftime("%A")
 
         volume_pivot = df.pivot_table(
