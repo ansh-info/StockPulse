@@ -10,7 +10,21 @@ class BigQueryLoader:
     def __init__(self):
         self.client = bigquery.Client()
         self.tables = {}
+        self.setup_dataset()
         self.setup_tables()
+
+    def setup_dataset(self):
+        """Create dataset if it doesn't exist"""
+        dataset_id = f"{GCP_CONFIG['PROJECT_ID']}.{GCP_CONFIG['DATASET_NAME']}"
+        dataset = bigquery.Dataset(dataset_id)
+        dataset.location = "US"  # Specify the location
+
+        try:
+            dataset = self.client.create_dataset(dataset, exists_ok=True)
+            print(f"Dataset {dataset_id} created or already exists.")
+        except Exception as e:
+            print(f"Error creating dataset: {e}")
+            raise
 
     def delete_extra_tables(self):
         """Delete the _raw and _processed tables if they exist"""
@@ -26,7 +40,9 @@ class BigQueryLoader:
                     self.client.delete_table(table_ref)
                     print(f"Deleted extra table: {table_name}")
                 except Exception as e:
-                    print(f"Error deleting table {table_name}: {e}")
+                    print(
+                        f"Note: Table {table_name} does not exist or could not be deleted: {e}"
+                    )
 
     def setup_tables(self):
         """Create tables for all configured stocks if they don't exist"""
@@ -48,10 +64,15 @@ class BigQueryLoader:
         ]
 
         for symbol, config in STOCK_CONFIGS.items():
-            table_ref = f"{dataset_ref}.{config['table_name']}"
-            table = bigquery.Table(table_ref, schema=schema)
-            self.tables[symbol] = self.client.create_table(table, exists_ok=True)
-            print(f"Ensured table exists for {symbol}: {config['table_name']}")
+            table_id = f"{dataset_ref}.{config['table_name']}"
+            table = bigquery.Table(table_id, schema=schema)
+
+            try:
+                self.tables[symbol] = self.client.create_table(table, exists_ok=True)
+                print(f"Ensured table exists for {symbol}: {config['table_name']}")
+            except Exception as e:
+                print(f"Error creating table for {symbol}: {e}")
+                raise
 
     def callback(self, message):
         try:
@@ -111,24 +132,28 @@ class BigQueryLoader:
 
 
 def main():
-    loader = BigQueryLoader()
-
-    # First, clean up extra tables
-    loader.delete_extra_tables()
-
-    subscriber = pubsub_v1.SubscriberClient()
-    subscription_path = subscriber.subscription_path(
-        GCP_CONFIG["PROJECT_ID"], "stock-data-sub"
-    )
-
-    streaming_pull_future = subscriber.subscribe(subscription_path, loader.callback)
-    print(f"Starting to listen for messages on {subscription_path}")
-
     try:
+        loader = BigQueryLoader()
+
+        # First, clean up extra tables
+        loader.delete_extra_tables()
+
+        subscriber = pubsub_v1.SubscriberClient()
+        subscription_path = subscriber.subscription_path(
+            GCP_CONFIG["PROJECT_ID"], "stock-data-sub"
+        )
+
+        streaming_pull_future = subscriber.subscribe(subscription_path, loader.callback)
+        print(f"Starting to listen for messages on {subscription_path}")
+
         streaming_pull_future.result()
     except KeyboardInterrupt:
-        streaming_pull_future.cancel()
+        if "streaming_pull_future" in locals():
+            streaming_pull_future.cancel()
         print("Stopped listening for messages")
+    except Exception as e:
+        print(f"Error in main: {e}")
+        raise
 
 
 if __name__ == "__main__":
