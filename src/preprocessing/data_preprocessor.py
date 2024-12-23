@@ -13,6 +13,47 @@ class DataPreprocessor:
         self.storage_client = storage.Client()
         self.bucket = self.storage_client.bucket(GCP_CONFIG["BUCKET_NAME"])
 
+    def preprocess_time_series(self, time_series: Dict) -> Dict:
+        """Process time series data and return processed records"""
+        try:
+            # Convert to DataFrame
+            df = pd.DataFrame.from_dict(time_series, orient="index")
+            df.reset_index(inplace=True)
+            df.columns = ["timestamp", "open", "high", "low", "close", "volume"]
+
+            # Clean numeric columns
+            for col in ["open", "high", "low", "close"]:
+                df[col] = pd.to_numeric(df[col].str.strip("1234. "))
+            df["volume"] = pd.to_numeric(df["volume"].str.strip("5. "))
+
+            # Convert timestamp to datetime
+            df["timestamp"] = pd.to_datetime(df["timestamp"])
+
+            # Extract date and time
+            df["date"] = df["timestamp"].dt.strftime("%Y-%m-%d")
+            df["time"] = df["timestamp"].dt.strftime("%H:%M:%S")
+
+            # Calculate moving averages
+            df["moving_average"] = df["close"].rolling(window=5, min_periods=1).mean()
+            df["cumulative_average"] = df["close"].expanding().mean()
+
+            # Convert to dictionary with timestamp as key
+            processed_data = {}
+            for _, row in df.iterrows():
+                timestamp = row["timestamp"].strftime("%Y-%m-%d %H:%M:%S")
+                processed_data[timestamp] = {
+                    "date": row["date"],
+                    "time": row["time"],
+                    "moving_average": float(row["moving_average"]),
+                    "cumulative_average": float(row["cumulative_average"]),
+                }
+
+            return processed_data
+
+        except Exception as e:
+            print(f"Error preprocessing time series: {e}")
+            return {}
+
     def save_raw_csv(self, data: Dict, symbol: str, timestamp: str) -> None:
         """Save raw data as CSV to Google Cloud Storage"""
         try:
