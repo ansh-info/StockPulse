@@ -12,11 +12,12 @@ class BigQueryLoader:
     def __init__(self):
         self.client = bigquery.Client()
         self.tables = {}
+        self.raw_tables = {}
         self.ensure_dataset_and_tables()
 
     @retry.Retry(predicate=retry.if_exception_type(Exception))
     def ensure_dataset_and_tables(self):
-        """Ensure dataset exists and create tables with retry mechanism"""
+        """Ensure dataset exists and create both raw and processed tables"""
         dataset_id = f"{GCP_CONFIG['PROJECT_ID']}.{GCP_CONFIG['DATASET_NAME']}"
 
         try:
@@ -29,8 +30,8 @@ class BigQueryLoader:
                 dataset = self.client.create_dataset(dataset, exists_ok=True)
                 print(f"Created dataset {dataset_id}")
 
-            # Create tables if they don't exist
-            schema = [
+            # Schema for processed data
+            processed_schema = [
                 bigquery.SchemaField("timestamp", "TIMESTAMP"),
                 bigquery.SchemaField("symbol", "STRING"),
                 bigquery.SchemaField("open", "FLOAT"),
@@ -44,16 +45,40 @@ class BigQueryLoader:
                 bigquery.SchemaField("cumulative_average", "FLOAT"),
             ]
 
+            # Schema for raw data
+            raw_schema = [
+                bigquery.SchemaField("timestamp", "TIMESTAMP"),
+                bigquery.SchemaField("open", "FLOAT"),
+                bigquery.SchemaField("high", "FLOAT"),
+                bigquery.SchemaField("low", "FLOAT"),
+                bigquery.SchemaField("close", "FLOAT"),
+                bigquery.SchemaField("volume", "INTEGER"),
+            ]
+
             for symbol, config in STOCK_CONFIGS.items():
-                table_id = f"{dataset_id}.{config['table_name']}"
+                # Create processed data table
+                processed_table_id = f"{dataset_id}.{config['table_name']}"
                 try:
-                    self.client.get_table(table_id)
+                    self.client.get_table(processed_table_id)
                 except Exception:
-                    table = bigquery.Table(table_id, schema=schema)
+                    table = bigquery.Table(processed_table_id, schema=processed_schema)
                     self.tables[symbol] = self.client.create_table(
                         table, exists_ok=True
                     )
-                    print(f"Created table for {symbol}: {config['table_name']}")
+                    print(
+                        f"Created processed table for {symbol}: {config['table_name']}"
+                    )
+
+                # Create raw data table
+                raw_table_id = f"{dataset_id}.{config['table_name']}_raw"
+                try:
+                    self.client.get_table(raw_table_id)
+                except Exception:
+                    raw_table = bigquery.Table(raw_table_id, schema=raw_schema)
+                    self.raw_tables[symbol] = self.client.create_table(
+                        raw_table, exists_ok=True
+                    )
+                    print(f"Created raw table for {symbol}: {config['table_name']}_raw")
 
         except Exception as e:
             print(f"Error in ensure_dataset_and_tables: {e}")
@@ -77,9 +102,12 @@ class BigQueryLoader:
             # Ensure dataset and tables exist before insertion
             self.ensure_dataset_and_tables()
 
-            table_id = f"{GCP_CONFIG['PROJECT_ID']}.{GCP_CONFIG['DATASET_NAME']}.{STOCK_CONFIGS[symbol]['table_name']}"
+            # Prepare table IDs for both raw and processed data
+            processed_table_id = f"{GCP_CONFIG['PROJECT_ID']}.{GCP_CONFIG['DATASET_NAME']}.{STOCK_CONFIGS[symbol]['table_name']}"
+            raw_table_id = f"{GCP_CONFIG['PROJECT_ID']}.{GCP_CONFIG['DATASET_NAME']}.{STOCK_CONFIGS[symbol]['table_name']}_raw"
 
-            rows_to_insert = [
+            # Prepare rows for processed data
+            processed_rows = [
                 {
                     "timestamp": data["timestamp"],
                     "symbol": data["symbol"],
@@ -103,22 +131,41 @@ class BigQueryLoader:
                 }
             ]
 
+            # Prepare rows for raw data
+            raw_rows = [
+                {
+                    "timestamp": data["timestamp"],
+                    "open": float(data["open"]),
+                    "high": float(data["high"]),
+                    "low": float(data["low"]),
+                    "close": float(data["close"]),
+                    "volume": int(data["volume"]),
+                }
+            ]
+
             max_retries = 3
             retry_count = 0
             while retry_count < max_retries:
                 try:
-                    errors = self.insert_rows(table_id, rows_to_insert)
-                    if errors == []:
+                    # Insert processed data
+                    processed_errors = self.insert_rows(
+                        processed_table_id, processed_rows
+                    )
+                    # Insert raw data
+                    raw_errors = self.insert_rows(raw_table_id, raw_rows)
+
+                    if processed_errors == [] and raw_errors == []:
                         print(
                             f"Data inserted successfully for {symbol} at {data['timestamp']}"
                         )
                         message.ack()
                         return
                     else:
-                        print(f"Errors: {errors}")
+                        print(f"Processed data errors: {processed_errors}")
+                        print(f"Raw data errors: {raw_errors}")
                         retry_count += 1
                         if retry_count < max_retries:
-                            time.sleep(2**retry_count)  # Exponential backoff
+                            time.sleep(2**retry_count)
                         else:
                             message.nack()
                 except Exception as e:
