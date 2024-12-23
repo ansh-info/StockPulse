@@ -1,11 +1,12 @@
 import json
 import time
 from datetime import datetime
+from typing import Dict
 
-import pandas as pd
 import requests
+import schedule
+from data_preprocessor import DataPreprocessor
 from google.cloud import pubsub_v1, storage
-from preprocessing_pipeline import StockDataPreprocessor
 
 from config import GCP_CONFIG, STOCK_CONFIGS, get_api_url
 
@@ -14,112 +15,120 @@ class StockDataPipeline:
     def __init__(self):
         self.publisher = pubsub_v1.PublisherClient()
         self.storage_client = storage.Client()
-        self.preprocessor = StockDataPreprocessor()
+        self.preprocessor = DataPreprocessor()
         self.topic_path = self.publisher.topic_path(
             GCP_CONFIG["PROJECT_ID"], GCP_CONFIG["TOPIC_NAME"]
         )
-        self.bucket = self.storage_client.bucket(GCP_CONFIG["BUCKET_NAME"])
 
-    def save_to_gcs(self, data: dict, symbol: str, timestamp: str) -> None:
+    def save_to_gcs(self, data: Dict, symbol: str, timestamp: str) -> None:
         """Save raw data to Google Cloud Storage"""
         try:
-            blob = self.bucket.blob(f"raw-data/{symbol}/{timestamp}.json")
+            # Save raw JSON
+            bucket = self.storage_client.bucket(GCP_CONFIG["BUCKET_NAME"])
+            blob = bucket.blob(f"raw-data/{symbol}/{timestamp}.json")
             blob.upload_from_string(json.dumps(data))
-            print(f"Saved raw data to GCS: {symbol} - {timestamp}")
+            print(f"Saved raw JSON to GCS: {symbol} - {timestamp}")
+
+            # Save raw CSV and processed data
+            self.preprocessor.save_raw_csv(data, symbol, timestamp)
+            processed_data = self.preprocessor.process_and_save_data(
+                data, symbol, timestamp
+            )
+            return processed_data
+
         except Exception as e:
             print(f"Error saving to GCS: {e}")
+            return None
 
-    def publish_to_pubsub(self, record: dict) -> None:
-        """Publish record to Pub/Sub"""
+    def publish_to_pubsub(self, raw_record: Dict, processed_data: Dict) -> None:
+        """Publish record to Pub/Sub with processed data"""
         try:
-            # Ensure the record has all required fields
-            if "timestamp" not in record:
-                current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                print(f"Adding timestamp {current_time} to record")
-                record["timestamp"] = current_time
-
-            # Remove NaN fields before publishing
-            cleaned_record = {
-                "timestamp": record["timestamp"],
-                "symbol": record["symbol"],
-                "open": float(record["open"]),
-                "high": float(record["high"]),
-                "low": float(record["low"]),
-                "close": float(record["close"]),
-                "volume": int(record["volume"]),
+            # Combine raw and processed data
+            record = {
+                "timestamp": raw_record["timestamp"],
+                "symbol": raw_record["symbol"],
+                "open": float(raw_record["open"]),
+                "high": float(raw_record["high"]),
+                "low": float(raw_record["low"]),
+                "close": float(raw_record["close"]),
+                "volume": int(raw_record["volume"]),
+                "date": processed_data.get("date"),
+                "time": processed_data.get("time"),
+                "moving_average": processed_data.get("moving_average"),
+                "cumulative_average": processed_data.get("cumulative_average"),
             }
 
-            # Create message and publish
-            message = json.dumps(cleaned_record).encode("utf-8")
+            message = json.dumps(record).encode("utf-8")
             future = self.publisher.publish(self.topic_path, data=message)
             message_id = future.result()
-            print(
-                f"Published message {message_id} for {record['symbol']} at {record['timestamp']}"
-            )
-
+            print(f"Published message {message_id} for {record['symbol']}")
         except Exception as e:
             print(f"Error publishing to Pub/Sub: {e}")
-            raise
 
-    def fetch_stock_data(self, symbol: str, config: dict) -> None:
+    def fetch_stock_data(self, symbol: str, config: Dict) -> None:
         """Fetch and process data for a single stock"""
         api_url = get_api_url(
             symbol=symbol, interval=config["interval"], api_key=config["api_key"]
         )
 
         try:
-            response = requests.get(api_url)
-            response.raise_for_status()  # Raise exception for bad status codes
-            data = response.json()
+            r = requests.get(api_url)
+            data = r.json()
 
             if "Time Series (5min)" in data:
                 time_series = data["Time Series (5min)"]
                 current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-                # Save raw response to GCS
-                self.save_to_gcs(data, symbol, current_time)
+                # Save raw data and get processed data
+                processed_data = self.save_to_gcs(data, symbol, current_time)
 
-                # Process and publish each data point
-                for timestamp_str, values in time_series.items():
-                    record = {
-                        "timestamp": timestamp_str,
-                        "symbol": symbol,
-                        "open": float(values["1. open"]),
-                        "high": float(values["2. high"]),
-                        "low": float(values["3. low"]),
-                        "close": float(values["4. close"]),
-                        "volume": int(values["5. volume"]),
-                    }
-                    self.publish_to_pubsub(record)
+                if processed_data:
+                    # Process and publish each data point
+                    for timestamp, values in time_series.items():
+                        raw_record = {
+                            "timestamp": timestamp,
+                            "symbol": symbol,
+                            "open": values["1. open"],
+                            "high": values["2. high"],
+                            "low": values["3. low"],
+                            "close": values["4. close"],
+                            "volume": values["5. volume"],
+                        }
+
+                        # Get processed data for this timestamp
+                        timestamp_processed_data = {
+                            "date": processed_data["date"].get(timestamp),
+                            "time": processed_data["time"].get(timestamp),
+                            "moving_average": processed_data["moving_average"].get(
+                                timestamp
+                            ),
+                            "cumulative_average": processed_data[
+                                "cumulative_average"
+                            ].get(timestamp),
+                        }
+
+                        self.publish_to_pubsub(raw_record, timestamp_processed_data)
 
                 print(f"Successfully processed data for {symbol}")
             else:
-                print(f"Error: Time Series data not found in response for {symbol}")
-                print("Response:", data)
+                print(f"Error: Time Series data not found in the response for {symbol}")
 
-        except requests.exceptions.RequestException as e:
-            print(f"Error fetching data for {symbol}: {e}")
         except Exception as e:
             print(f"Error processing {symbol}: {e}")
-        finally:
-            # Add delay to respect rate limits
-            time.sleep(12)  # Alpha Vantage free tier allows 5 calls per minute
 
-
-def process_all_stocks():
-    """Process all configured stocks"""
-    pipeline = StockDataPipeline()
-    for symbol, config in STOCK_CONFIGS.items():
-        try:
-            pipeline.fetch_stock_data(symbol, config)
-        except Exception as e:
-            print(f"Error processing {symbol}: {e}")
+        # Add delay to respect rate limits
+        time.sleep(12)  # Alpha Vantage free tier allows 5 calls per minute
 
 
 def main():
-    # Schedule the task to run every hour
-    import schedule
+    pipeline = StockDataPipeline()
 
+    def process_all_stocks():
+        """Process all configured stocks"""
+        for symbol, config in STOCK_CONFIGS.items():
+            pipeline.fetch_stock_data(symbol, config)
+
+    # Schedule the task to run every hour
     schedule.every(1).hour.do(process_all_stocks)
 
     # Run immediately for the first time
@@ -136,7 +145,7 @@ def main():
             break
         except Exception as e:
             print(f"Error occurred: {e}")
-            time.sleep(60)  # Wait a minute before retrying
+            time.sleep(60)
 
 
 if __name__ == "__main__":
