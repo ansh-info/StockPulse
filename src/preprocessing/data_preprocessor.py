@@ -27,7 +27,7 @@ class DataPreprocessor:
         try:
             logger.info("Starting time series preprocessing")
 
-            # Convert to DataFrame
+            # Convert to DataFrame and ensure proper sorting
             df = pd.DataFrame.from_dict(time_series, orient="index")
             df.reset_index(inplace=True)
             df.columns = ["timestamp", "open", "high", "low", "close", "volume"]
@@ -40,16 +40,19 @@ class DataPreprocessor:
 
             # Convert timestamp to datetime and sort
             df["timestamp"] = pd.to_datetime(df["timestamp"])
-            df = df.sort_values("timestamp")
+            df = df.sort_values("timestamp", ascending=True)
 
             # Extract date and time
             df["date"] = df["timestamp"].dt.strftime("%Y-%m-%d")
             df["time"] = df["timestamp"].dt.strftime("%H:%M:%S")
 
-            # Calculate moving averages
-            logger.debug("Calculating moving averages")
-            df["moving_average"] = df["close"].rolling(window=5, min_periods=1).mean()
-            df["cumulative_average"] = df["close"].expanding().mean()
+            # Calculate moving averages within each date
+            df["moving_average"] = df.groupby("date")["close"].transform(
+                lambda x: x.rolling(window=5, min_periods=1).mean()
+            )
+            df["cumulative_average"] = df.groupby("date")["close"].transform(
+                lambda x: x.expanding().mean()
+            )
 
             # Convert to dictionary with timestamp as key
             processed_data = {}
@@ -80,8 +83,6 @@ class DataPreprocessor:
             # Convert to DataFrame
             df = pd.DataFrame.from_dict(time_series, orient="index")
             df.reset_index(inplace=True)
-
-            # Rename columns
             df.columns = ["timestamp", "open", "high", "low", "close", "volume"]
 
             # Clean numeric columns
@@ -89,9 +90,9 @@ class DataPreprocessor:
                 df[col] = pd.to_numeric(df[col].str.strip("1234. "))
             df["volume"] = pd.to_numeric(df["volume"].str.strip("5. "))
 
-            # Sort by timestamp
+            # Convert timestamp to datetime and sort
             df["timestamp"] = pd.to_datetime(df["timestamp"])
-            df = df.sort_values("timestamp")
+            df = df.sort_values("timestamp", ascending=True)
 
             # Save as CSV
             blob = self.bucket.blob(f"raw-data/{symbol}/{timestamp}.csv")
@@ -111,11 +112,9 @@ class DataPreprocessor:
             # Extract time series data
             time_series = data["Time Series (5min)"]
 
-            # Convert to DataFrame
+            # Convert to DataFrame with proper sorting
             df = pd.DataFrame.from_dict(time_series, orient="index")
             df.reset_index(inplace=True)
-
-            # Rename columns
             df.columns = ["timestamp", "open", "high", "low", "close", "volume"]
 
             # Clean numeric columns
@@ -125,18 +124,19 @@ class DataPreprocessor:
 
             # Convert timestamp to datetime and sort
             df["timestamp"] = pd.to_datetime(df["timestamp"])
-            df = df.sort_values("timestamp")
+            df = df.sort_values("timestamp", ascending=True)
 
             # Add date and time columns
             df["date"] = df["timestamp"].dt.date
             df["time"] = df["timestamp"].dt.time
 
-            # Calculate moving averages
-            logger.debug("Calculating moving averages")
+            # Calculate moving averages within each date
             df["moving_average"] = df.groupby("date")["close"].transform(
                 lambda x: x.rolling(window=5, min_periods=1).mean()
             )
-            df["cumulative_average"] = df["close"].expanding().mean()
+            df["cumulative_average"] = df.groupby("date")["close"].transform(
+                lambda x: x.expanding().mean()
+            )
 
             # Save processed CSV
             blob = self.bucket.blob(
