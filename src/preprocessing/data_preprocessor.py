@@ -38,9 +38,9 @@ class DataPreprocessor:
                 df[col] = pd.to_numeric(df[col].str.strip("1234. "))
             df["volume"] = pd.to_numeric(df["volume"].str.strip("5. "))
 
-            # Convert timestamp to datetime and sort
+            # Convert timestamp to datetime and sort in descending order
             df["timestamp"] = pd.to_datetime(df["timestamp"])
-            df = df.sort_values("timestamp", ascending=True)
+            df = df.sort_values("timestamp", ascending=False)
 
             # Extract date and time
             df["date"] = df["timestamp"].dt.strftime("%Y-%m-%d")
