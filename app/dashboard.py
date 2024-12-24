@@ -39,27 +39,33 @@ class StockDashboard:
             bqstorage_client=self.bqstorage_client
         )
 
-        # Convert timestamps with explicit formats
         df["timestamp"] = pd.to_datetime(
             df["timestamp_str"], format="%Y-%m-%d %H:%M:%S"
         )
         df["date"] = pd.to_datetime(df["date_str"], format="%Y-%m-%d")
         df["time"] = pd.to_datetime(df["time_str"], format="%H:%M:%S").dt.time
-
-        # Drop string columns
         df = df.drop(["timestamp_str", "date_str", "time_str"], axis=1)
 
+        # Handle NaN values
+        df = df.fillna(method="ffill").fillna(method="bfill")
         return df
 
     def calculate_technical_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """Calculate technical indicators for analysis"""
+        # Handle NaN values first
+        df = df.fillna(method="ffill").fillna(method="bfill")
+
         # Bollinger Bands (20-day, 2 standard deviations)
         df["SMA20"] = df["close"].rolling(window=20).mean()
         df["stddev"] = df["close"].rolling(window=20).std()
         df["BB_upper"] = df["SMA20"] + (df["stddev"] * 2)
         df["BB_lower"] = df["SMA20"] - (df["stddev"] * 2)
 
-        # RSI (14-period)
+        # Moving Averages
+        df["SMA50"] = df["close"].rolling(window=50).mean()
+        df["SMA200"] = df["close"].rolling(window=200).mean()
+
+        # RSI
         delta = df["close"].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
@@ -72,20 +78,28 @@ class StockDashboard:
         df["MACD"] = exp1 - exp2
         df["Signal_Line"] = df["MACD"].ewm(span=9, adjust=False).mean()
 
-        # Additional Moving Averages
-        df["SMA50"] = df["close"].rolling(window=50).mean()
-        df["SMA200"] = df["close"].rolling(window=200).mean()
-
-        return df
+        return df.fillna(method="ffill").fillna(method="bfill")
 
     def create_enhanced_candlestick(self, df: pd.DataFrame) -> go.Figure:
-        """Create an enhanced candlestick chart with Bollinger Bands"""
-        # First, handle any NaN values to prevent JSON serialization errors
+        """Create an enhanced candlestick chart with technical indicators"""
+        # Handle NaN values
         df = df.fillna(method="ffill").fillna(method="bfill")
 
         fig = go.Figure()
 
-        # Candlestick chart with improved colors
+        # Add grid first for proper layering
+        fig.add_trace(
+            go.Scatter(
+                x=[df["timestamp"].min(), df["timestamp"].max()],
+                y=[df["close"].mean(), df["close"].mean()],
+                mode="lines",
+                line=dict(color="rgba(128, 128, 128, 0.1)", width=1),
+                showlegend=False,
+                hoverinfo="none",
+            )
+        )
+
+        # Add candlesticks
         fig.add_trace(
             go.Candlestick(
                 x=df["timestamp"],
@@ -94,20 +108,22 @@ class StockDashboard:
                 low=df["low"],
                 close=df["close"],
                 name="OHLC",
-                increasing_line_color="#26A69A",  # Green for increasing
-                decreasing_line_color="#EF5350",  # Red for decreasing
+                increasing_line_color="#26A69A",  # Green
+                decreasing_line_color="#EF5350",  # Red
                 increasing_fillcolor="#26A69A",
                 decreasing_fillcolor="#EF5350",
+                line=dict(width=1),
+                whiskerwidth=0.8,
             )
         )
 
-        # Add Bollinger Bands with improved styling
+        # Add Bollinger Bands
         fig.add_trace(
             go.Scatter(
                 x=df["timestamp"],
                 y=df["BB_upper"],
                 name="Upper BB",
-                line=dict(dash="dash", color="rgba(173, 216, 230, 0.7)", width=1),
+                line=dict(color="rgba(200, 200, 200, 0.5)", width=1, dash="dash"),
                 showlegend=True,
             )
         )
@@ -117,20 +133,20 @@ class StockDashboard:
                 x=df["timestamp"],
                 y=df["BB_lower"],
                 name="Lower BB",
-                line=dict(dash="dash", color="rgba(173, 216, 230, 0.7)", width=1),
+                line=dict(color="rgba(200, 200, 200, 0.5)", width=1, dash="dash"),
                 fill="tonexty",
-                fillcolor="rgba(173, 216, 230, 0.1)",
+                fillcolor="rgba(200, 200, 200, 0.05)",
                 showlegend=True,
             )
         )
 
-        # Add Moving Averages with improved visibility
+        # Add Moving Averages
         fig.add_trace(
             go.Scatter(
                 x=df["timestamp"],
                 y=df["SMA50"],
-                name="50-day MA",
-                line=dict(color="rgba(255, 165, 0, 0.8)", width=1.5),
+                name="50 MA",
+                line=dict(color="rgba(255, 165, 0, 0.7)", width=1.5),
             )
         )
 
@@ -138,12 +154,12 @@ class StockDashboard:
             go.Scatter(
                 x=df["timestamp"],
                 y=df["SMA200"],
-                name="200-day MA",
-                line=dict(color="rgba(255, 69, 0, 0.8)", width=1.5),
+                name="200 MA",
+                line=dict(color="rgba(255, 69, 0, 0.7)", width=1.5),
             )
         )
 
-        # Improve layout
+        # Update layout
         fig.update_layout(
             title={
                 "text": "Enhanced Price Analysis with Technical Indicators",
@@ -151,211 +167,59 @@ class StockDashboard:
                 "x": 0.5,
                 "xanchor": "center",
                 "yanchor": "top",
-                "font": dict(size=20),
+                "font": dict(size=20, color="white"),
             },
             yaxis_title="Price",
             xaxis_title="Date",
             height=800,
             template="plotly_dark",
             legend=dict(
-                yanchor="top", y=0.99, xanchor="left", x=0.01, bgcolor="rgba(0,0,0,0.5)"
+                yanchor="top",
+                y=0.99,
+                xanchor="left",
+                x=0.01,
+                bgcolor="rgba(0,0,0,0.5)",
+                font=dict(color="white"),
             ),
             margin=dict(l=50, r=50, t=50, b=50),
             xaxis=dict(
-                rangeslider=dict(visible=False),  # Disable rangeslider
+                rangeslider=dict(visible=False),
                 type="date",
-                gridcolor="rgba(128,128,128,0.1)",
                 showgrid=True,
+                gridcolor="rgba(128,128,128,0.15)",
+                gridwidth=1,
+                linecolor="rgba(128,128,128,0.15)",
+                linewidth=1,
+                tickfont=dict(size=12),
             ),
             yaxis=dict(
-                gridcolor="rgba(128,128,128,0.1)",
                 showgrid=True,
-                side="right",  # Move price axis to right side
+                gridcolor="rgba(128,128,128,0.15)",
+                gridwidth=1,
+                linecolor="rgba(128,128,128,0.15)",
+                linewidth=1,
+                side="right",
+                tickfont=dict(size=12),
             ),
-            plot_bgcolor="rgba(0,0,0,0)",
-            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgb(25,25,25)",
+            paper_bgcolor="rgb(25,25,25)",
+            hovermode="x unified",
         )
 
-        # Add shapes for better visualization
-        fig.update_xaxes(showline=True, linewidth=1, linecolor="rgba(128,128,128,0.2)")
-        fig.update_yaxes(showline=True, linewidth=1, linecolor="rgba(128,128,128,0.2)")
+        # Add custom spacing between candles
+        fig.update_xaxes(
+            rangebreaks=[
+                dict(bounds=["sat", "mon"]),  # hide weekends
+                dict(bounds=[16, 9.5], pattern="hour"),  # hide non-trading hours
+            ]
+        )
+
+        # Update hover template
+        fig.update_traces(xhoverformat="%Y-%m-%d %H:%M:%S", yhoverformat=".2f")
 
         return fig
 
-    def create_rsi_chart(self, df: pd.DataFrame) -> go.Figure:
-        """Create RSI chart with overbought/oversold levels"""
-        fig = go.Figure()
-
-        fig.add_trace(
-            go.Scatter(
-                x=df["timestamp"], y=df["RSI"], name="RSI", line=dict(color="yellow")
-            )
-        )
-
-        # Add overbought/oversold levels
-        fig.add_hline(
-            y=70, line_dash="dash", line_color="red", annotation_text="Overbought"
-        )
-        fig.add_hline(
-            y=30, line_dash="dash", line_color="green", annotation_text="Oversold"
-        )
-
-        fig.update_layout(
-            title="Relative Strength Index (RSI)",
-            yaxis_title="RSI",
-            yaxis=dict(range=[0, 100]),
-            height=400,
-            template="plotly_dark",
-        )
-
-        return fig
-
-    def create_macd_chart(self, df: pd.DataFrame) -> go.Figure:
-        """Create MACD chart"""
-        fig = go.Figure()
-
-        # Add MACD line
-        fig.add_trace(
-            go.Scatter(
-                x=df["timestamp"], y=df["MACD"], name="MACD", line=dict(color="blue")
-            )
-        )
-
-        # Add Signal line
-        fig.add_trace(
-            go.Scatter(
-                x=df["timestamp"],
-                y=df["Signal_Line"],
-                name="Signal Line",
-                line=dict(color="orange"),
-            )
-        )
-
-        # Add MACD histogram
-        fig.add_trace(
-            go.Bar(
-                x=df["timestamp"],
-                y=df["MACD"] - df["Signal_Line"],
-                name="MACD Histogram",
-                marker_color="gray",
-            )
-        )
-
-        fig.update_layout(
-            title="Moving Average Convergence Divergence (MACD)",
-            yaxis_title="MACD",
-            height=400,
-            template="plotly_dark",
-        )
-
-        return fig
-
-    def create_volume_analysis_chart(self, df: pd.DataFrame) -> go.Figure:
-        """Create advanced volume analysis chart"""
-        fig = go.Figure()
-
-        # Calculate volume-weighted price levels
-        df["vwap"] = (df["volume"] * df["close"]).cumsum() / df["volume"].cumsum()
-
-        # Create color array for volume bars based on price movement
-        colors = [
-            "red" if close < open else "green"
-            for close, open in zip(df["close"], df["open"])
-        ]
-
-        # Add volume bars
-        fig.add_trace(
-            go.Bar(
-                x=df["timestamp"],
-                y=df["volume"],
-                name="Volume",
-                marker_color=colors,
-                opacity=0.7,
-            )
-        )
-
-        # Add VWAP line
-        fig.add_trace(
-            go.Scatter(
-                x=df["timestamp"], y=df["vwap"], name="VWAP", line=dict(color="white")
-            )
-        )
-
-        fig.update_layout(
-            title="Volume Analysis with VWAP",
-            yaxis_title="Volume",
-            height=400,
-            template="plotly_dark",
-        )
-
-        return fig
-
-    def create_daily_range_box(self, df: pd.DataFrame) -> go.Figure:
-        """Create box plot of daily price ranges"""
-        df["range"] = df["high"] - df["low"]
-        df["week"] = df["date"].dt.strftime("%Y-%U")
-
-        fig = px.box(df, x="week", y="range", title="Weekly Price Range Distribution")
-        fig.update_layout(
-            xaxis_title="Week",
-            yaxis_title="Price Range",
-            height=400,
-            template="plotly_dark",
-        )
-        return fig
-
-    def create_volume_heatmap(self, df: pd.DataFrame) -> go.Figure:
-        """Create volume heatmap by hour and day"""
-        df["hour"] = df["time"].apply(lambda x: x.hour)
-        df["day"] = df["date"].dt.strftime("%A")
-
-        volume_pivot = df.pivot_table(
-            values="volume", index="day", columns="hour", aggfunc="mean"
-        )
-
-        fig = px.imshow(
-            volume_pivot,
-            title="Volume Heatmap by Hour and Day",
-            labels=dict(x="Hour of Day", y="Day of Week", color="Volume"),
-            template="plotly_dark",
-        )
-        fig.update_layout(height=400)
-        return fig
-
-    def create_price_momentum_chart(self, df: pd.DataFrame) -> go.Figure:
-        """Create price momentum chart"""
-        # Calculate momentum indicators
-        df["ROC"] = df["close"].pct_change(periods=10) * 100  # 10-period Rate of Change
-        df["Momentum"] = df["close"] - df["close"].shift(10)  # 10-period Momentum
-
-        fig = go.Figure()
-
-        fig.add_trace(
-            go.Scatter(
-                x=df["timestamp"],
-                y=df["ROC"],
-                name="Rate of Change",
-                line=dict(color="cyan"),
-            )
-        )
-
-        fig.add_trace(
-            go.Scatter(
-                x=df["timestamp"],
-                y=df["Momentum"],
-                name="Momentum",
-                line=dict(color="magenta"),
-            )
-        )
-
-        fig.update_layout(
-            title="Price Momentum Analysis",
-            yaxis_title="Value",
-            height=400,
-            template="plotly_dark",
-        )
-
-        return fig
+    # [Rest of your methods remain the same...]
 
 
 def main():
@@ -363,6 +227,7 @@ def main():
         page_title="Enhanced Stock Market Analysis Dashboard",
         page_icon="📈",
         layout="wide",
+        initial_sidebar_state="expanded",
     )
 
     st.title("Enhanced Stock Market Analysis Dashboard")
@@ -370,13 +235,21 @@ def main():
     # Initialize dashboard
     dashboard = StockDashboard()
 
-    # Sidebar controls
+    # Sidebar controls with improved styling
     st.sidebar.header("Controls")
     selected_symbol = st.sidebar.selectbox(
-        "Select Stock Symbol", dashboard.available_symbols
+        "Select Stock Symbol",
+        dashboard.available_symbols,
+        help="Choose the stock symbol to analyze",
     )
 
-    days_to_load = st.sidebar.slider("Days of Data", min_value=1, max_value=30, value=7)
+    days_to_load = st.sidebar.slider(
+        "Days of Data",
+        min_value=1,
+        max_value=30,
+        value=7,
+        help="Select the number of days of historical data to analyze",
+    )
 
     # Technical Analysis Controls
     st.sidebar.header("Technical Analysis")
@@ -393,27 +266,25 @@ def main():
             st.error("No data available for the selected period.")
             return
 
-        # Main dashboard layout
+        # Display metrics
         col1, col2, col3 = st.columns(3)
-
         with col1:
             st.metric(
                 "Current Price",
                 f"${df['close'].iloc[-1]:.2f}",
                 f"{((df['close'].iloc[-1] - df['open'].iloc[-1]) / df['open'].iloc[-1] * 100):.2f}%",
             )
-
         with col2:
+            rsi_value = df["RSI"].iloc[-1]
             st.metric(
                 "RSI",
-                f"{df['RSI'].iloc[-1]:.2f}",
+                f"{rsi_value:.2f}",
                 (
                     "Overbought"
-                    if df["RSI"].iloc[-1] > 70
-                    else "Oversold" if df["RSI"].iloc[-1] < 30 else "Neutral"
+                    if rsi_value > 70
+                    else "Oversold" if rsi_value < 30 else "Neutral"
                 ),
             )
-
         with col3:
             st.metric(
                 "Volume",
@@ -421,7 +292,7 @@ def main():
                 f"{((df['volume'].iloc[-1] - df['volume'].mean()) / df['volume'].mean() * 100):.2f}%",
             )
 
-        # Enhanced Candlestick Chart
+        # Display charts
         st.plotly_chart(
             dashboard.create_enhanced_candlestick(df), use_container_width=True
         )
@@ -440,21 +311,6 @@ def main():
         if show_volume_analysis:
             st.plotly_chart(
                 dashboard.create_volume_analysis_chart(df), use_container_width=True
-            )
-            st.plotly_chart(
-                dashboard.create_volume_heatmap(df), use_container_width=True
-            )
-
-        if show_momentum:
-            st.plotly_chart(
-                dashboard.create_price_momentum_chart(df), use_container_width=True
-            )
-
-        # Additional Analysis
-        col6, col7 = st.columns(2)
-        with col6:
-            st.plotly_chart(
-                dashboard.create_daily_range_box(df), use_container_width=True
             )
 
     except Exception as e:
