@@ -13,10 +13,11 @@ from config import GCP_CONFIG, STOCK_CONFIGS
 # Set up logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger(__name__)
+
 
 class BigQueryLoader:
     def __init__(self):
@@ -24,7 +25,7 @@ class BigQueryLoader:
         self.tables = {}
         self.raw_tables = {}
         self.message_buffer = {}  # Buffer for batch processing
-        self.buffer_size = 100    # Number of messages to buffer before insertion
+        self.buffer_size = 100  # Number of messages to buffer before insertion
         self.buffer_timeout = 60  # Maximum seconds to hold messages in buffer
         self.last_flush_time = time.time()
         self.ensure_dataset_and_tables()
@@ -71,88 +72,84 @@ class BigQueryLoader:
             ]
 
             for symbol, config in STOCK_CONFIGS.items():
-                # Create processed data table with partitioning and clustering
+                # Create processed data table
                 processed_table_id = f"{dataset_id}.{config['table_name']}"
                 try:
                     self.client.get_table(processed_table_id)
                 except Exception:
                     table = bigquery.Table(processed_table_id, schema=processed_schema)
-                    
-                    # Only set the table schema without partitioning
-                    
-                    self.tables[symbol] = self.client.create_table(table, exists_ok=True)
-                    logger.info(f"Created processed table for {symbol}: {config['table_name']}")
+                    self.tables[symbol] = self.client.create_table(
+                        table, exists_ok=True
+                    )
+                    logger.info(
+                        f"Created processed table for {symbol}: {config['table_name']}"
+                    )
 
-                # Create raw data table with partitioning and clustering
+                # Create raw data table
                 raw_table_id = f"{dataset_id}.{config['table_name']}_raw"
                 try:
                     self.client.get_table(raw_table_id)
                 except Exception:
                     raw_table = bigquery.Table(raw_table_id, schema=raw_schema)
-                    
-                    # Set time partitioning for raw table
-                    raw_table.time_partitioning = bigquery.TimePartitioning(
-                        type_=bigquery.TimePartitioningType.DAY,
-                        field="timestamp"
+                    self.raw_tables[symbol] = self.client.create_table(
+                        raw_table, exists_ok=True
                     )
-                    
-                    # Set clustering fields for raw table
-                    raw_table.clustering_fields = ["symbol", "timestamp"]
-                    
-                    self.raw_tables[symbol] = self.client.create_table(raw_table, exists_ok=True)
-                    logger.info(f"Created raw table for {symbol}: {config['table_name']}_raw")
+                    logger.info(
+                        f"Created raw table for {symbol}: {config['table_name']}_raw"
+                    )
 
         except Exception as e:
             logger.error(f"Error in ensure_dataset_and_tables: {e}")
             raise
 
-    @retry.Retry(predicate=retry.if_exception_type(Exception))
-    def insert_rows(self, table_id: str, rows: list):
-        """Insert rows with retry mechanism"""
-        return self.client.insert_rows_json(table_id, rows)
-
     def check_duplicate(self, table_id: str, timestamp: str, symbol: str) -> bool:
         """Check if a record already exists in BigQuery"""
-        try:
-            # First check if this timestamp is older than what we want
-            current_time = datetime.utcnow()
-            record_time = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
-            time_difference = current_time - record_time
-            
-            # Skip data older than 7 days
-            if time_difference.days > 7:
-                logger.info(f"Skipping old data point from {timestamp}")
-                return True
-                
-            query = f"""
-            SELECT COUNT(*) as count
+        query = f"""
+        SELECT EXISTS (
+            SELECT 1
             FROM `{table_id}`
-            WHERE timestamp = '{timestamp}'
+            WHERE CAST(timestamp AS STRING) = '{timestamp}'
             AND symbol = '{symbol}'
-            """
+        ) as exists_flag
+        """
         try:
             query_job = self.client.query(query)
             results = query_job.result()
             for row in results:
-                return row.count > 0
+                if row.exists_flag:
+                    logger.info(
+                        f"Duplicate record found for {symbol} at {timestamp}, skipping..."
+                    )
+                    return True
+            return False
         except Exception as e:
             logger.error(f"Error checking duplicates: {e}")
             return False
+
+    @retry.Retry(predicate=retry.if_exception_type(Exception))
+    def insert_rows(self, table_id: str, rows: list):
+        """Insert rows with retry mechanism"""
+        try:
+            sorted_rows = sorted(rows, key=lambda x: x["timestamp"])
+            return self.client.insert_rows_json(table_id, sorted_rows)
+        except Exception as e:
+            logger.error(f"Error inserting rows: {e}")
+            raise
 
     def buffer_message(self, table_id: str, row: Dict, is_raw: bool = False):
         """Buffer messages for batch processing"""
         if table_id not in self.message_buffer:
             self.message_buffer[table_id] = []
-        
+
         self.message_buffer[table_id].append(row)
-        
+
         # Check if we should flush the buffer
         current_time = time.time()
         should_flush = (
-            len(self.message_buffer[table_id]) >= self.buffer_size or
-            current_time - self.last_flush_time >= self.buffer_timeout
+            len(self.message_buffer[table_id]) >= self.buffer_size
+            or current_time - self.last_flush_time >= self.buffer_timeout
         )
-        
+
         if should_flush:
             self.flush_buffer(table_id)
 
@@ -163,7 +160,7 @@ class BigQueryLoader:
 
         rows = self.message_buffer[table_id]
         logger.info(f"Flushing {len(rows)} rows to {table_id}")
-        
+
         try:
             errors = self.insert_rows(table_id, rows)
             if not errors:
@@ -191,7 +188,6 @@ class BigQueryLoader:
 
             # Check for duplicates
             if self.check_duplicate(processed_table_id, timestamp, symbol):
-                logger.info(f"Duplicate record found for {symbol} at {timestamp}, skipping...")
                 message.ack()
                 return
 
@@ -206,8 +202,16 @@ class BigQueryLoader:
                 "volume": int(data["volume"]),
                 "date": data["date"],
                 "time": data["time"],
-                "moving_average": float(data["moving_average"]) if data["moving_average"] is not None else None,
-                "cumulative_average": float(data["cumulative_average"]) if data["cumulative_average"] is not None else None
+                "moving_average": (
+                    float(data["moving_average"])
+                    if data["moving_average"] is not None
+                    else None
+                ),
+                "cumulative_average": (
+                    float(data["cumulative_average"])
+                    if data["cumulative_average"] is not None
+                    else None
+                ),
             }
 
             # Prepare raw data row
@@ -218,13 +222,13 @@ class BigQueryLoader:
                 "high": float(data["high"]),
                 "low": float(data["low"]),
                 "close": float(data["close"]),
-                "volume": int(data["volume"])
+                "volume": int(data["volume"]),
             }
 
             # Buffer the messages
             self.buffer_message(processed_table_id, processed_row)
             self.buffer_message(raw_table_id, raw_row, is_raw=True)
-            
+
             message.ack()
             logger.info(f"Processed message for {symbol} at {timestamp}")
 
@@ -238,9 +242,10 @@ class BigQueryLoader:
         for table_id in self.message_buffer.keys():
             self.flush_buffer(table_id)
 
+
 def main():
     logger.info("Starting BigQuery Loader...")
-    
+
     while True:
         try:
             loader = BigQueryLoader()
@@ -264,6 +269,7 @@ def main():
             logger.error(f"Error in main loop: {e}")
             logger.info("Restarting loader in 10 seconds...")
             time.sleep(10)
+
 
 if __name__ == "__main__":
     main()
