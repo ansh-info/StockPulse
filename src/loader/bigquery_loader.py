@@ -169,8 +169,9 @@ class BigQueryLoader:
             try:
                 self.client.get_dataset(dataset_id)
             except Exception:
-                logger.warning(f"Dataset not found, recreating {dataset_id}")
+                logger.info(f"Dataset not found, recreating {dataset_id}")
                 self.ensure_dataset_and_tables()
+                logger.info("Dataset and tables recreated successfully")
 
             errors = self.insert_rows(table_id, rows)
             if not errors:
@@ -180,20 +181,28 @@ class BigQueryLoader:
             else:
                 logger.error(f"Errors during batch insertion: {errors}")
         except Exception as e:
-            logger.error(f"Error flushing buffer: {e}")
-            time.sleep(2)  # Add small delay before retry
-            try:
-                # Second attempt after ensuring dataset exists
-                self.ensure_dataset_and_tables()
-                errors = self.insert_rows(table_id, rows)
-                if not errors:
-                    logger.info(
-                        f"Successfully inserted {len(rows)} rows to {table_id} on retry"
-                    )
-                    self.message_buffer[table_id] = []
-                    self.last_flush_time = time.time()
-            except Exception as retry_error:
-                logger.error(f"Error on retry: {retry_error}")
+            if "404" in str(e) and ("not found" in str(e) or "is deleted" in str(e)):
+                logger.info(
+                    "Table or dataset not found, attempting recreation and retry"
+                )
+                try:
+                    # Second attempt after ensuring dataset exists
+                    self.ensure_dataset_and_tables()
+                    logger.info("Successfully recreated tables")
+                    errors = self.insert_rows(table_id, rows)
+                    if not errors:
+                        logger.info(
+                            f"Successfully inserted {len(rows)} rows to {table_id} on retry"
+                        )
+                        self.message_buffer[table_id] = []
+                        self.last_flush_time = time.time()
+                    else:
+                        logger.error(f"Errors during retry batch insertion: {errors}")
+                except Exception as retry_error:
+                    logger.error(f"Error on retry: {retry_error}")
+            else:
+                logger.error(f"Error flushing buffer: {e}")
+                logger.error("This error was not related to missing tables/dataset")
 
     def callback(self, message):
         try:
