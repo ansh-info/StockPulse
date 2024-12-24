@@ -88,7 +88,10 @@ class StockDataPipeline:
             query_job = self.bigquery_client.query(query)
             results = query_job.result()
             for row in results:
-                return row.latest_timestamp
+                if row.latest_timestamp:
+                    # Convert to timezone-naive datetime for consistency
+                    return row.latest_timestamp.replace(tzinfo=None)
+            return None
         except Exception as e:
             logger.error(f"Error getting latest timestamp for {symbol}: {e}")
             return None
@@ -100,6 +103,7 @@ class StockDataPipeline:
         if latest_timestamp is None:
             return True
 
+        # Use timezone-naive comparison
         current_time = datetime.utcnow()
         time_difference = current_time - latest_timestamp
 
@@ -135,8 +139,8 @@ class StockDataPipeline:
                     dt = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
                     time_difference = current_time - dt
 
-                    # Only keep data from the last 7 days
-                    if time_difference.days <= 7:
+                    # Keep data from the last 30 days
+                    if time_difference.days <= 30:
                         if latest_timestamp is None or dt > latest_timestamp:
                             filtered_time_series[timestamp] = values
 
