@@ -6,7 +6,10 @@ from typing import Dict, Optional
 
 import requests
 import schedule
+from data_preprocessor import DataPreprocessor
 from google.cloud import bigquery, pubsub_v1, storage
+
+from config import GCP_CONFIG, STOCK_CONFIGS, get_api_url
 
 # Set up logging
 logging.basicConfig(
@@ -27,6 +30,51 @@ class StockDataPipeline:
             GCP_CONFIG["PROJECT_ID"], GCP_CONFIG["TOPIC_NAME"]
         )
         self.last_fetch_times = {}
+
+    def save_to_gcs(self, data: Dict, symbol: str, timestamp: str) -> None:
+        """Save raw data to Google Cloud Storage"""
+        try:
+            logger.info(f"Saving raw data to GCS for {symbol} at {timestamp}")
+            bucket = self.storage_client.bucket(GCP_CONFIG["BUCKET_NAME"])
+            blob = bucket.blob(f"raw-data/{symbol}/{timestamp}.json")
+            blob.upload_from_string(json.dumps(data))
+            logger.info(f"Successfully saved raw JSON to GCS: {symbol} - {timestamp}")
+        except Exception as e:
+            logger.error(f"Error saving to GCS: {e}")
+            raise
+
+    def publish_to_pubsub(
+        self, timestamp: str, symbol: str, values: Dict, processed_data: Dict
+    ) -> None:
+        """Publish record to Pub/Sub"""
+        try:
+            # Combine raw and processed data
+            record = {
+                "timestamp": timestamp,
+                "symbol": symbol,
+                "open": float(values["1. open"]),
+                "high": float(values["2. high"]),
+                "low": float(values["3. low"]),
+                "close": float(values["4. close"]),
+                "volume": int(values["5. volume"]),
+                "date": processed_data.get(timestamp, {}).get("date"),
+                "time": processed_data.get(timestamp, {}).get("time"),
+                "moving_average": processed_data.get(timestamp, {}).get(
+                    "moving_average"
+                ),
+                "cumulative_average": processed_data.get(timestamp, {}).get(
+                    "cumulative_average"
+                ),
+            }
+
+            message = json.dumps(record).encode("utf-8")
+            future = self.publisher.publish(self.topic_path, data=message)
+            message_id = future.result()
+            logger.info(f"Published message {message_id} for {symbol} at {timestamp}")
+        except Exception as e:
+            logger.error(f"Error publishing to Pub/Sub: {e}")
+            logger.error(f"Record content: {record}")
+            raise
 
     def get_latest_timestamp(self, symbol: str) -> Optional[datetime]:
         """Get the latest timestamp for a symbol from BigQuery"""
@@ -82,10 +130,15 @@ class StockDataPipeline:
 
                 # Filter out old data points
                 filtered_time_series = {}
+                current_time = datetime.utcnow()
                 for timestamp, values in time_series.items():
                     dt = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
-                    if latest_timestamp is None or dt > latest_timestamp:
-                        filtered_time_series[timestamp] = values
+                    time_difference = current_time - dt
+
+                    # Only keep data from the last 7 days
+                    if time_difference.days <= 7:
+                        if latest_timestamp is None or dt > latest_timestamp:
+                            filtered_time_series[timestamp] = values
 
                 if not filtered_time_series:
                     logger.info(f"No new data points for {symbol}")
