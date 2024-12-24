@@ -130,7 +130,9 @@ class BigQueryLoader:
     def insert_rows(self, table_id: str, rows: list):
         """Insert rows with retry mechanism"""
         try:
-            sorted_rows = sorted(rows, key=lambda x: x["timestamp"])
+            sorted_rows = sorted(
+                rows, key=lambda x: x["timestamp"], reverse=True
+            )  # Sort in descending order
             return self.client.insert_rows_json(table_id, sorted_rows)
         except Exception as e:
             logger.error(f"Error inserting rows: {e}")
@@ -162,6 +164,14 @@ class BigQueryLoader:
         logger.info(f"Flushing {len(rows)} rows to {table_id}")
 
         try:
+            # Check if dataset exists, recreate if needed
+            dataset_id = f"{GCP_CONFIG['PROJECT_ID']}.{GCP_CONFIG['DATASET_NAME']}"
+            try:
+                self.client.get_dataset(dataset_id)
+            except Exception:
+                logger.warning(f"Dataset not found, recreating {dataset_id}")
+                self.ensure_dataset_and_tables()
+
             errors = self.insert_rows(table_id, rows)
             if not errors:
                 logger.info(f"Successfully inserted {len(rows)} rows to {table_id}")
@@ -171,6 +181,19 @@ class BigQueryLoader:
                 logger.error(f"Errors during batch insertion: {errors}")
         except Exception as e:
             logger.error(f"Error flushing buffer: {e}")
+            time.sleep(2)  # Add small delay before retry
+            try:
+                # Second attempt after ensuring dataset exists
+                self.ensure_dataset_and_tables()
+                errors = self.insert_rows(table_id, rows)
+                if not errors:
+                    logger.info(
+                        f"Successfully inserted {len(rows)} rows to {table_id} on retry"
+                    )
+                    self.message_buffer[table_id] = []
+                    self.last_flush_time = time.time()
+            except Exception as retry_error:
+                logger.error(f"Error on retry: {retry_error}")
 
     def callback(self, message):
         try:
