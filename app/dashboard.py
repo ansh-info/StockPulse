@@ -80,9 +80,12 @@ class StockDashboard:
 
     def create_enhanced_candlestick(self, df: pd.DataFrame) -> go.Figure:
         """Create an enhanced candlestick chart with Bollinger Bands"""
+        # First, handle any NaN values to prevent JSON serialization errors
+        df = df.fillna(method="ffill").fillna(method="bfill")
+
         fig = go.Figure()
 
-        # Candlestick chart
+        # Candlestick chart with improved colors
         fig.add_trace(
             go.Candlestick(
                 x=df["timestamp"],
@@ -91,16 +94,21 @@ class StockDashboard:
                 low=df["low"],
                 close=df["close"],
                 name="OHLC",
+                increasing_line_color="#26A69A",  # Green for increasing
+                decreasing_line_color="#EF5350",  # Red for decreasing
+                increasing_fillcolor="#26A69A",
+                decreasing_fillcolor="#EF5350",
             )
         )
 
-        # Add Bollinger Bands
+        # Add Bollinger Bands with improved styling
         fig.add_trace(
             go.Scatter(
                 x=df["timestamp"],
                 y=df["BB_upper"],
                 name="Upper BB",
-                line=dict(dash="dash", color="gray"),
+                line=dict(dash="dash", color="rgba(173, 216, 230, 0.7)", width=1),
+                showlegend=True,
             )
         )
 
@@ -109,18 +117,20 @@ class StockDashboard:
                 x=df["timestamp"],
                 y=df["BB_lower"],
                 name="Lower BB",
-                line=dict(dash="dash", color="gray"),
+                line=dict(dash="dash", color="rgba(173, 216, 230, 0.7)", width=1),
                 fill="tonexty",
+                fillcolor="rgba(173, 216, 230, 0.1)",
+                showlegend=True,
             )
         )
 
-        # Add Moving Averages
+        # Add Moving Averages with improved visibility
         fig.add_trace(
             go.Scatter(
                 x=df["timestamp"],
                 y=df["SMA50"],
                 name="50-day MA",
-                line=dict(color="orange"),
+                line=dict(color="rgba(255, 165, 0, 0.8)", width=1.5),
             )
         )
 
@@ -129,17 +139,46 @@ class StockDashboard:
                 x=df["timestamp"],
                 y=df["SMA200"],
                 name="200-day MA",
-                line=dict(color="red"),
+                line=dict(color="rgba(255, 69, 0, 0.8)", width=1.5),
             )
         )
 
+        # Improve layout
         fig.update_layout(
-            title="Enhanced Price Analysis with Technical Indicators",
+            title={
+                "text": "Enhanced Price Analysis with Technical Indicators",
+                "y": 0.95,
+                "x": 0.5,
+                "xanchor": "center",
+                "yanchor": "top",
+                "font": dict(size=20),
+            },
             yaxis_title="Price",
             xaxis_title="Date",
             height=800,
             template="plotly_dark",
+            legend=dict(
+                yanchor="top", y=0.99, xanchor="left", x=0.01, bgcolor="rgba(0,0,0,0.5)"
+            ),
+            margin=dict(l=50, r=50, t=50, b=50),
+            xaxis=dict(
+                rangeslider=dict(visible=False),  # Disable rangeslider
+                type="date",
+                gridcolor="rgba(128,128,128,0.1)",
+                showgrid=True,
+            ),
+            yaxis=dict(
+                gridcolor="rgba(128,128,128,0.1)",
+                showgrid=True,
+                side="right",  # Move price axis to right side
+            ),
+            plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor="rgba(0,0,0,0)",
         )
+
+        # Add shapes for better visualization
+        fig.update_xaxes(showline=True, linewidth=1, linecolor="rgba(128,128,128,0.2)")
+        fig.update_yaxes(showline=True, linewidth=1, linecolor="rgba(128,128,128,0.2)")
 
         return fig
 
