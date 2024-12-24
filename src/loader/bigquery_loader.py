@@ -7,6 +7,8 @@ from typing import Dict, List
 from google.api_core import retry
 from google.cloud import bigquery, pubsub_v1
 
+from config import GCP_CONFIG, STOCK_CONFIGS
+
 # Set up logging
 logging.basicConfig(
     level=logging.INFO,
@@ -26,6 +28,101 @@ class BigQueryLoader:
         self.buffer_timeout = 60  # Maximum seconds to hold messages in buffer
         self.last_flush_time = time.time()
         self.ensure_dataset_and_tables()
+
+    @retry.Retry(predicate=retry.if_exception_type(Exception))
+    def ensure_dataset_and_tables(self):
+        """Ensure dataset exists and create both raw and processed tables"""
+        dataset_id = f"{GCP_CONFIG['PROJECT_ID']}.{GCP_CONFIG['DATASET_NAME']}"
+
+        try:
+            # Get dataset or create if it doesn't exist
+            try:
+                dataset = self.client.get_dataset(dataset_id)
+            except Exception:
+                dataset = bigquery.Dataset(dataset_id)
+                dataset.location = "US"
+                dataset = self.client.create_dataset(dataset, exists_ok=True)
+                logger.info(f"Created dataset {dataset_id}")
+
+            # Schema for processed data
+            processed_schema = [
+                bigquery.SchemaField("timestamp", "TIMESTAMP"),
+                bigquery.SchemaField("symbol", "STRING"),
+                bigquery.SchemaField("open", "FLOAT"),
+                bigquery.SchemaField("high", "FLOAT"),
+                bigquery.SchemaField("low", "FLOAT"),
+                bigquery.SchemaField("close", "FLOAT"),
+                bigquery.SchemaField("volume", "INTEGER"),
+                bigquery.SchemaField("date", "STRING"),
+                bigquery.SchemaField("time", "STRING"),
+                bigquery.SchemaField("moving_average", "FLOAT"),
+                bigquery.SchemaField("cumulative_average", "FLOAT"),
+            ]
+
+            # Schema for raw data
+            raw_schema = [
+                bigquery.SchemaField("timestamp", "TIMESTAMP"),
+                bigquery.SchemaField("symbol", "STRING"),
+                bigquery.SchemaField("open", "FLOAT"),
+                bigquery.SchemaField("high", "FLOAT"),
+                bigquery.SchemaField("low", "FLOAT"),
+                bigquery.SchemaField("close", "FLOAT"),
+                bigquery.SchemaField("volume", "INTEGER"),
+            ]
+
+            for symbol, config in STOCK_CONFIGS.items():
+                # Create processed data table with partitioning and clustering
+                processed_table_id = f"{dataset_id}.{config['table_name']}"
+                try:
+                    self.client.get_table(processed_table_id)
+                except Exception:
+                    table = bigquery.Table(processed_table_id, schema=processed_schema)
+
+                    # Set time partitioning
+                    table.time_partitioning = bigquery.TimePartitioning(
+                        type_=bigquery.TimePartitioningType.DAY, field="timestamp"
+                    )
+
+                    # Set clustering fields
+                    table.clustering_fields = ["symbol", "time"]
+
+                    self.tables[symbol] = self.client.create_table(
+                        table, exists_ok=True
+                    )
+                    logger.info(
+                        f"Created processed table for {symbol}: {config['table_name']}"
+                    )
+
+                # Create raw data table with partitioning and clustering
+                raw_table_id = f"{dataset_id}.{config['table_name']}_raw"
+                try:
+                    self.client.get_table(raw_table_id)
+                except Exception:
+                    raw_table = bigquery.Table(raw_table_id, schema=raw_schema)
+
+                    # Set time partitioning for raw table
+                    raw_table.time_partitioning = bigquery.TimePartitioning(
+                        type_=bigquery.TimePartitioningType.DAY, field="timestamp"
+                    )
+
+                    # Set clustering fields for raw table
+                    raw_table.clustering_fields = ["symbol", "timestamp"]
+
+                    self.raw_tables[symbol] = self.client.create_table(
+                        raw_table, exists_ok=True
+                    )
+                    logger.info(
+                        f"Created raw table for {symbol}: {config['table_name']}_raw"
+                    )
+
+        except Exception as e:
+            logger.error(f"Error in ensure_dataset_and_tables: {e}")
+            raise
+
+    @retry.Retry(predicate=retry.if_exception_type(Exception))
+    def insert_rows(self, table_id: str, rows: list):
+        """Insert rows with retry mechanism"""
+        return self.client.insert_rows_json(table_id, rows)
 
     def check_duplicate(self, table_id: str, timestamp: str, symbol: str) -> bool:
         """Check if a record already exists in BigQuery"""
