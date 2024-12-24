@@ -39,3 +39,31 @@ To check if it's receiving messages, we need to:
 ```
 https://console.cloud.google.com/dataflow/jobs/us-central1/28959?project=stock-data-pipeline
 ```
+
+## Solution Implemented
+
+1. **Deduplication Pipeline** (`dedup_pipeline.py`):
+
+   ```python
+   Key Features:
+   - Handles both raw and processed tables
+   - Continuous monitoring (5-min intervals)
+   - Uses ROW_NUMBER() for deduplication
+   - Maintains data integrity
+   ```
+
+2. **Deduplication Logic**:
+
+```sql
+WITH RankedRecords AS (
+    SELECT *,
+    ROW_NUMBER() OVER (
+        PARTITION BY symbol, timestamp
+        ORDER BY timestamp DESC
+    ) as rn
+    FROM `table`
+)
+SELECT [columns]
+FROM RankedRecords
+WHERE rn = 1
+```
