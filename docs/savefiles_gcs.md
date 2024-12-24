@@ -65,3 +65,40 @@ GCP_CONFIG = {
     "DATASET_NAME": "stock_market",
 }
 ```
+
+2. **Data Flow**:
+
+```plaintext
+Alpha Vantage API → Stock Pipeline → Pub/Sub → BigQuery Loader → BigQuery Tables
+                                  → GCS Storage → Data Preprocessor
+```
+
+3. **Storage Structure**:
+
+```plaintext
+BigQuery Dataset (stock_market):
+├── Processed Tables
+│   ├── amazon_stock
+│   ├── tesla_stock
+│   ├── [other stock tables]
+└── Raw Tables
+    ├── amazon_stock_raw
+    ├── tesla_stock_raw
+    └── [other raw tables]
+
+GCS Bucket:
+├── raw-data/
+│   └── {symbol}/
+└── processed-data/
+    └── {symbol}/
+```
+
+## Configuration
+
+```python
+Key Settings:
+- Project ID: stock-data-pipeline-444011
+- Dataset: stock_market
+- Interval: 5 minutes
+- Stocks: AMZN, TSLA, PFE, JPM, IBM, XOM, KO, AAPL
+```
