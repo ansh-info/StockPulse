@@ -41,16 +41,30 @@ class StockDashboard:
                 bqstorage_client=self.bqstorage_client
             )
 
-            df["timestamp"] = pd.to_datetime(
-                df["timestamp_str"], format="%Y-%m-%d %H:%M:%S"
-            )
-            df["date"] = pd.to_datetime(df["date_str"], format="%Y-%m-%d")
-            df["time"] = pd.to_datetime(df["time_str"], format="%H:%M:%S").dt.time
+            # Convert string columns to proper datetime types
+            df["timestamp"] = pd.to_datetime(df["timestamp_str"])
+            df["date"] = pd.to_datetime(df["date_str"])
+            df["time"] = pd.to_datetime(df["time_str"]).dt.time
             df = df.drop(["timestamp_str", "date_str", "time_str"], axis=1)
+
+            # Convert numeric columns to proper types
+            numeric_columns = [
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "moving_average",
+                "cumulative_average",
+            ]
+            for col in numeric_columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
 
             # Handle NaN values
             df = df.fillna(method="ffill").fillna(method="bfill")
+
             return df
+
         except bigquery.exceptions.NotFound:
             raise Exception(f"Table for symbol {symbol} not found in BigQuery")
         except Exception as e:
@@ -60,6 +74,11 @@ class StockDashboard:
         """Calculate technical indicators for analysis"""
         # Handle NaN values first
         df = df.fillna(method="ffill").fillna(method="bfill")
+
+        # Ensure numeric types
+        numeric_columns = ["close", "high", "low", "volume", "open"]
+        for col in numeric_columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
 
         # Bollinger Bands (20-day, 2 standard deviations)
         df["SMA20"] = df["close"].rolling(window=20).mean()
@@ -98,18 +117,39 @@ class StockDashboard:
         df["%K"] = ((df["close"] - low_min) / (high_max - low_min)) * 100
         df["%D"] = df["%K"].rolling(3).mean()
 
-        return df.fillna(method="ffill").fillna(method="bfill")
+        # Final cleanup of any remaining NA values
+        df = df.fillna(method="ffill").fillna(method="bfill")
+
+        # Replace any infinite values with NaN and then fill them
+        df = df.replace([np.inf, -np.inf], np.nan)
+        df = df.fillna(method="ffill").fillna(method="bfill")
+
+        # Ensure all numeric columns are float64
+        for col in df.select_dtypes(include=[np.number]).columns:
+            df[col] = df[col].astype("float64")
+
+        return df
 
     def create_enhanced_candlestick(self, df: pd.DataFrame) -> go.Figure:
         """Create an enhanced candlestick chart with technical indicators"""
+        # Ensure data is clean before creating the chart
+        df = df.copy()  # Create a copy to avoid modifying the original
         df = df.fillna(method="ffill").fillna(method="bfill")
+        df = (
+            df.replace([np.inf, -np.inf], np.nan)
+            .fillna(method="ffill")
+            .fillna(method="bfill")
+        )
+
+        # Convert timestamp for JSON serialization
+        df["timestamp_str"] = df["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
 
         fig = go.Figure()
 
         # Add grid first for proper layering
         fig.add_trace(
             go.Scatter(
-                x=[df["timestamp"].min(), df["timestamp"].max()],
+                x=[df["timestamp_str"].min(), df["timestamp_str"].max()],
                 y=[df["close"].mean(), df["close"].mean()],
                 mode="lines",
                 line=dict(color="rgba(128, 128, 128, 0.1)", width=1),
@@ -121,14 +161,14 @@ class StockDashboard:
         # Add candlesticks
         fig.add_trace(
             go.Candlestick(
-                x=df["timestamp"],
+                x=df["timestamp_str"],
                 open=df["open"],
                 high=df["high"],
                 low=df["low"],
                 close=df["close"],
                 name="OHLC",
-                increasing_line_color="#26A69A",  # Green
-                decreasing_line_color="#EF5350",  # Red
+                increasing_line_color="#26A69A",
+                decreasing_line_color="#EF5350",
                 increasing_fillcolor="#26A69A",
                 decreasing_fillcolor="#EF5350",
                 line=dict(width=1),
@@ -139,7 +179,7 @@ class StockDashboard:
         # Add Bollinger Bands
         fig.add_trace(
             go.Scatter(
-                x=df["timestamp"],
+                x=df["timestamp_str"],
                 y=df["BB_upper"],
                 name="Upper BB",
                 line=dict(color="rgba(200, 200, 200, 0.5)", width=1, dash="dash"),
@@ -149,7 +189,7 @@ class StockDashboard:
 
         fig.add_trace(
             go.Scatter(
-                x=df["timestamp"],
+                x=df["timestamp_str"],
                 y=df["BB_lower"],
                 name="Lower BB",
                 line=dict(color="rgba(200, 200, 200, 0.5)", width=1, dash="dash"),
@@ -162,7 +202,7 @@ class StockDashboard:
         # Add Moving Averages
         fig.add_trace(
             go.Scatter(
-                x=df["timestamp"],
+                x=df["timestamp_str"],
                 y=df["SMA50"],
                 name="50 MA",
                 line=dict(color="rgba(255, 165, 0, 0.7)", width=1.5),
@@ -171,7 +211,7 @@ class StockDashboard:
 
         fig.add_trace(
             go.Scatter(
-                x=df["timestamp"],
+                x=df["timestamp_str"],
                 y=df["SMA200"],
                 name="200 MA",
                 line=dict(color="rgba(255, 69, 0, 0.7)", width=1.5),
@@ -186,42 +226,42 @@ class StockDashboard:
                 "x": 0.5,
                 "xanchor": "center",
                 "yanchor": "top",
-                "font": dict(size=20, color="white"),
+                "font": dict(size=20, color="black"),
             },
             yaxis_title="Price",
             xaxis_title="Date",
             height=800,
-            template="plotly_dark",
+            template="none",
             legend=dict(
                 yanchor="top",
                 y=0.99,
                 xanchor="left",
                 x=0.01,
-                bgcolor="rgba(0,0,0,0.5)",
-                font=dict(color="white"),
+                bgcolor="rgba(255,255,255,0.8)",
+                font=dict(color="black"),
             ),
             margin=dict(l=50, r=50, t=50, b=50),
             xaxis=dict(
                 rangeslider=dict(visible=False),
                 type="date",
                 showgrid=True,
-                gridcolor="rgba(128,128,128,0.15)",
+                gridcolor="rgba(200,200,200,0.5)",
                 gridwidth=1,
-                linecolor="rgba(128,128,128,0.15)",
+                linecolor="rgba(200,200,200,0.5)",
                 linewidth=1,
-                tickfont=dict(size=12),
+                tickfont=dict(size=12, color="black"),
             ),
             yaxis=dict(
                 showgrid=True,
-                gridcolor="rgba(128,128,128,0.15)",
+                gridcolor="rgba(200,200,200,0.5)",
                 gridwidth=1,
-                linecolor="rgba(128,128,128,0.15)",
+                linecolor="rgba(200,200,200,0.5)",
                 linewidth=1,
                 side="right",
-                tickfont=dict(size=12),
+                tickfont=dict(size=12, color="black"),
             ),
-            plot_bgcolor="rgb(25,25,25)",
-            paper_bgcolor="rgb(25,25,25)",
+            plot_bgcolor="white",
+            paper_bgcolor="white",
             hovermode="x unified",
         )
 
@@ -240,15 +280,20 @@ class StockDashboard:
 
     def create_rsi_chart(self, df: pd.DataFrame) -> go.Figure:
         """Create RSI chart with overbought/oversold levels"""
+        df = df.copy()
+        df["timestamp_str"] = df["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
+
         fig = go.Figure()
 
         fig.add_trace(
             go.Scatter(
-                x=df["timestamp"], y=df["RSI"], name="RSI", line=dict(color="yellow")
+                x=df["timestamp_str"],
+                y=df["RSI"],
+                name="RSI",
+                line=dict(color="yellow"),
             )
         )
 
-        # Add overbought/oversold levels
         fig.add_hline(
             y=70, line_dash="dash", line_color="red", annotation_text="Overbought"
         )
@@ -269,29 +314,32 @@ class StockDashboard:
 
     def create_macd_chart(self, df: pd.DataFrame) -> go.Figure:
         """Create MACD chart"""
+        df = df.copy()
+        df["timestamp_str"] = df["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
+
         fig = go.Figure()
 
-        # Add MACD line
         fig.add_trace(
             go.Scatter(
-                x=df["timestamp"], y=df["MACD"], name="MACD", line=dict(color="blue")
+                x=df["timestamp_str"],
+                y=df["MACD"],
+                name="MACD",
+                line=dict(color="blue"),
             )
         )
 
-        # Add Signal line
         fig.add_trace(
             go.Scatter(
-                x=df["timestamp"],
+                x=df["timestamp_str"],
                 y=df["Signal_Line"],
                 name="Signal Line",
                 line=dict(color="orange"),
             )
         )
 
-        # Add MACD histogram
         fig.add_trace(
             go.Bar(
-                x=df["timestamp"],
+                x=df["timestamp_str"],
                 y=df["MACD"] - df["Signal_Line"],
                 name="MACD Histogram",
                 marker_color="gray",
@@ -310,7 +358,8 @@ class StockDashboard:
 
     def create_volume_analysis_chart(self, df: pd.DataFrame) -> go.Figure:
         """Create advanced volume analysis chart"""
-        fig = go.Figure()
+        df = df.copy()
+        df["timestamp_str"] = df["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
 
         # Calculate volume-weighted price levels
         df["vwap"] = (df["volume"] * df["close"]).cumsum() / df["volume"].cumsum()
@@ -321,10 +370,11 @@ class StockDashboard:
             for close, open in zip(df["close"], df["open"])
         ]
 
-        # Add volume bars
+        fig = go.Figure()
+
         fig.add_trace(
             go.Bar(
-                x=df["timestamp"],
+                x=df["timestamp_str"],
                 y=df["volume"],
                 name="Volume",
                 marker_color=colors,
@@ -332,10 +382,12 @@ class StockDashboard:
             )
         )
 
-        # Add VWAP line
         fig.add_trace(
             go.Scatter(
-                x=df["timestamp"], y=df["vwap"], name="VWAP", line=dict(color="white")
+                x=df["timestamp_str"],
+                y=df["vwap"],
+                name="VWAP",
+                line=dict(color="white"),
             )
         )
 
@@ -351,8 +403,12 @@ class StockDashboard:
 
     def create_daily_range_box(self, df: pd.DataFrame) -> go.Figure:
         """Create box plot of daily price ranges"""
+        df = df.copy()
         df["range"] = df["high"] - df["low"]
         df["week"] = df["date"].dt.strftime("%Y-%U")
+
+        # Handle any NaN values
+        df = df.fillna(method="ffill").fillna(method="bfill")
 
         fig = px.box(df, x="week", y="range", title="Weekly Price Range Distribution")
         fig.update_layout(
@@ -365,12 +421,18 @@ class StockDashboard:
 
     def create_volume_heatmap(self, df: pd.DataFrame) -> go.Figure:
         """Create volume heatmap by hour and day"""
+        df = df.copy()
         df["hour"] = df["time"].apply(lambda x: x.hour)
         df["day"] = df["date"].dt.strftime("%A")
 
+        # Handle any NaN values before pivoting
+        df = df.fillna(method="ffill").fillna(method="bfill")
+
         volume_pivot = df.pivot_table(
             values="volume", index="day", columns="hour", aggfunc="mean"
-        )
+        ).fillna(
+            0
+        )  # Fill NaN values after pivot
 
         fig = px.imshow(
             volume_pivot,
@@ -383,23 +445,23 @@ class StockDashboard:
 
     def create_stochastic_chart(self, df: pd.DataFrame) -> go.Figure:
         """Create Stochastic Oscillator chart"""
+        df = df.copy()
+        df["timestamp_str"] = df["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
+
         fig = go.Figure()
 
-        # Add %K line
         fig.add_trace(
             go.Scatter(
-                x=df["timestamp"], y=df["%K"], name="%K", line=dict(color="blue")
+                x=df["timestamp_str"], y=df["%K"], name="%K", line=dict(color="blue")
             )
         )
 
-        # Add %D line
         fig.add_trace(
             go.Scatter(
-                x=df["timestamp"], y=df["%D"], name="%D", line=dict(color="orange")
+                x=df["timestamp_str"], y=df["%D"], name="%D", line=dict(color="orange")
             )
         )
 
-        # Add overbought/oversold levels
         fig.add_hline(
             y=80, line_dash="dash", line_color="red", annotation_text="Overbought"
         )
@@ -420,15 +482,21 @@ class StockDashboard:
 
     def create_price_momentum_chart(self, df: pd.DataFrame) -> go.Figure:
         """Create price momentum chart"""
+        df = df.copy()
+        df["timestamp_str"] = df["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
+
         # Calculate momentum indicators
-        df["ROC"] = df["close"].pct_change(periods=10) * 100  # 10-period Rate of Change
-        df["Momentum"] = df["close"] - df["close"].shift(10)  # 10-period Momentum
+        df["ROC"] = df["close"].pct_change(periods=10) * 100
+        df["Momentum"] = df["close"] - df["close"].shift(10)
+
+        # Handle any NaN values
+        df = df.fillna(method="ffill").fillna(method="bfill")
 
         fig = go.Figure()
 
         fig.add_trace(
             go.Scatter(
-                x=df["timestamp"],
+                x=df["timestamp_str"],
                 y=df["ROC"],
                 name="Rate of Change",
                 line=dict(color="cyan"),
@@ -437,7 +505,7 @@ class StockDashboard:
 
         fig.add_trace(
             go.Scatter(
-                x=df["timestamp"],
+                x=df["timestamp_str"],
                 y=df["Momentum"],
                 name="Momentum",
                 line=dict(color="magenta"),
@@ -456,11 +524,17 @@ class StockDashboard:
 
     def create_atr_chart(self, df: pd.DataFrame) -> go.Figure:
         """Create Average True Range chart"""
+        df = df.copy()
+        df["timestamp_str"] = df["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
+
         fig = go.Figure()
 
         fig.add_trace(
             go.Scatter(
-                x=df["timestamp"], y=df["ATR"], name="ATR", line=dict(color="orange")
+                x=df["timestamp_str"],
+                y=df["ATR"],
+                name="ATR",
+                line=dict(color="orange"),
             )
         )
 
@@ -522,11 +596,14 @@ def main():
 
         # Load and process data
         df = dashboard.load_data(selected_symbol, days_to_load)
-        df = dashboard.calculate_technical_indicators(df)
 
+        # Validate and clean data
         if df.empty:
             st.error("No data available for the selected period.")
             return
+
+        # Calculate technical indicators with clean data
+        df = dashboard.calculate_technical_indicators(df)
 
         # Add Summary Statistics
         with st.expander("Summary Statistics"):
@@ -544,18 +621,20 @@ def main():
                 },
                 index=["Min", "Average", "Max"],
             )
+            # Round values to prevent serialization issues
+            summary_stats = summary_stats.round(2)
             st.dataframe(summary_stats.style.format("{:.2f}"))
 
         # Display metrics
         col1, col2, col3 = st.columns(3)
         with col1:
-            st.metric(
-                "Current Price",
-                f"${df['close'].iloc[-1]:.2f}",
-                f"{((df['close'].iloc[-1] - df['open'].iloc[-1]) / df['open'].iloc[-1] * 100):.2f}%",
+            current_price = float(df["close"].iloc[-1])
+            price_change = float(
+                (df["close"].iloc[-1] - df["open"].iloc[-1]) / df["open"].iloc[-1] * 100
             )
+            st.metric("Current Price", f"${current_price:.2f}", f"{price_change:.2f}%")
         with col2:
-            rsi_value = df["RSI"].iloc[-1]
+            rsi_value = float(df["RSI"].iloc[-1])
             st.metric(
                 "RSI",
                 f"{rsi_value:.2f}",
@@ -566,11 +645,13 @@ def main():
                 ),
             )
         with col3:
-            st.metric(
-                "Volume",
-                f"{df['volume'].iloc[-1]:,.0f}",
-                f"{((df['volume'].iloc[-1] - df['volume'].mean()) / df['volume'].mean() * 100):.2f}%",
+            current_volume = float(df["volume"].iloc[-1])
+            volume_change = float(
+                (df["volume"].iloc[-1] - df["volume"].mean())
+                / df["volume"].mean()
+                * 100
             )
+            st.metric("Volume", f"{current_volume:,.0f}", f"{volume_change:.2f}%")
 
         # Display main chart
         st.plotly_chart(
