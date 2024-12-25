@@ -1,11 +1,23 @@
+import json
 import logging
+import os
+import sys
+import time
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, Optional
 
 import pandas as pd
 from google.cloud import storage
 
-from config import GCP_CONFIG
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(os.path.dirname(current_dir))
+if project_root not in sys.path:
+    sys.path.append(project_root)
+    print(f"Added to Python path: {project_root}")
+
+
+from src.config.config import GCP_CONFIG
 
 # Set up logging
 logging.basicConfig(
