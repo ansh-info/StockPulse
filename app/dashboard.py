@@ -82,7 +82,9 @@ class StockDashboard:
     def calculate_technical_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """Calculate technical indicators for analysis"""
         # Handle NaN values first
-        df = df.fillna(method="ffill").fillna(method="bfill")
+        df = df.fillna(method="ffill").fillna(
+            method="bfill"
+        )  # More explicit NaN handling
 
         # Ensure numeric types
         numeric_columns = ["close", "high", "low", "volume", "open"]
