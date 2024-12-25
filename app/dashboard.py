@@ -50,10 +50,12 @@ class StockDashboard:
                 bqstorage_client=self.bqstorage_client
             )
 
-            # Convert string columns to proper datetime types
-            df["timestamp"] = pd.to_datetime(df["timestamp_str"])
-            df["date"] = pd.to_datetime(df["date_str"])
-            df["time"] = pd.to_datetime(df["time_str"]).dt.time
+            # Convert string columns to proper datetime types with explicit formats
+            df["timestamp"] = pd.to_datetime(
+                df["timestamp_str"], format="%Y-%m-%d %H:%M:%S"
+            )
+            df["date"] = pd.to_datetime(df["date_str"], format="%Y-%m-%d")
+            df["time"] = pd.to_datetime(df["time_str"], format="%H:%M:%S").dt.time
             df = df.drop(["timestamp_str", "date_str", "time_str"], axis=1)
 
             # Convert numeric columns to proper types
@@ -70,7 +72,7 @@ class StockDashboard:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
 
             # Handle NaN values
-            df = df.fillna(method="ffill").fillna(method="bfill")
+            df = df.ffill().bfill()
 
             return df
 
@@ -81,8 +83,11 @@ class StockDashboard:
 
     def calculate_technical_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """Calculate technical indicators for analysis"""
+        # Make a copy to avoid modifying the input DataFrame
+        df = df.copy()
+
         # Handle NaN values first
-        df = df.fillna(method="ffill").fillna(method="bfill")
+        df = df.ffill().bfill()
 
         # Ensure numeric types
         numeric_columns = ["close", "high", "low", "volume", "open"]
@@ -127,11 +132,11 @@ class StockDashboard:
         df["%D"] = df["%K"].rolling(3).mean()
 
         # Final cleanup of any remaining NA values
-        df = df.fillna(method="ffill").fillna(method="bfill")
+        df = df.ffill().bfill()
 
         # Replace any infinite values with NaN and then fill them
         df = df.replace([np.inf, -np.inf], np.nan)
-        df = df.fillna(method="ffill").fillna(method="bfill")
+        df = df.ffill().bfill()
 
         # Ensure all numeric columns are float64
         for col in df.select_dtypes(include=[np.number]).columns:
@@ -141,14 +146,10 @@ class StockDashboard:
 
     def create_enhanced_candlestick(self, df: pd.DataFrame) -> go.Figure:
         """Create an enhanced candlestick chart with technical indicators"""
-        # Ensure data is clean before creating the chart
-        df = df.copy()  # Create a copy to avoid modifying the original
-        df = df.fillna(method="ffill").fillna(method="bfill")
-        df = (
-            df.replace([np.inf, -np.inf], np.nan)
-            .fillna(method="ffill")
-            .fillna(method="bfill")
-        )
+        # Make a copy and clean data
+        df = df.copy()
+        df = df.ffill().bfill()
+        df = df.replace([np.inf, -np.inf], np.nan).ffill().bfill()
 
         # Convert timestamp for JSON serialization
         df["timestamp_str"] = df["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
@@ -158,7 +159,7 @@ class StockDashboard:
         # Add grid first for proper layering
         fig.add_trace(
             go.Scatter(
-                x=[df["timestamp_str"].min(), df["timestamp_str"].max()],
+                x=[df["timestamp_str"].iloc[0], df["timestamp_str"].iloc[-1]],
                 y=[df["close"].mean(), df["close"].mean()],
                 mode="lines",
                 line=dict(color="rgba(128, 128, 128, 0.1)", width=1),
@@ -282,7 +283,6 @@ class StockDashboard:
             ]
         )
 
-        # Update hover template
         fig.update_traces(xhoverformat="%Y-%m-%d %H:%M:%S", yhoverformat=".2f")
 
         return fig
@@ -290,6 +290,7 @@ class StockDashboard:
     def create_rsi_chart(self, df: pd.DataFrame) -> go.Figure:
         """Create RSI chart with overbought/oversold levels"""
         df = df.copy()
+        df = df.ffill().bfill()
         df["timestamp_str"] = df["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
 
         fig = go.Figure()
@@ -324,6 +325,7 @@ class StockDashboard:
     def create_macd_chart(self, df: pd.DataFrame) -> go.Figure:
         """Create MACD chart"""
         df = df.copy()
+        df = df.ffill().bfill()
         df["timestamp_str"] = df["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
 
         fig = go.Figure()
@@ -368,6 +370,7 @@ class StockDashboard:
     def create_volume_analysis_chart(self, df: pd.DataFrame) -> go.Figure:
         """Create advanced volume analysis chart"""
         df = df.copy()
+        df = df.ffill().bfill()
         df["timestamp_str"] = df["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
 
         # Calculate volume-weighted price levels
@@ -417,7 +420,7 @@ class StockDashboard:
         df["week"] = df["date"].dt.strftime("%Y-%U")
 
         # Handle any NaN values
-        df = df.fillna(method="ffill").fillna(method="bfill")
+        df = df.ffill().bfill()
 
         fig = px.box(df, x="week", y="range", title="Weekly Price Range Distribution")
         fig.update_layout(
@@ -435,13 +438,13 @@ class StockDashboard:
         df["day"] = df["date"].dt.strftime("%A")
 
         # Handle any NaN values before pivoting
-        df = df.fillna(method="ffill").fillna(method="bfill")
+        df = df.ffill().bfill()
 
         volume_pivot = df.pivot_table(
             values="volume", index="day", columns="hour", aggfunc="mean"
         ).fillna(
             0
-        )  # Fill NaN values after pivot
+        )  # Fill NaN values after pivot with explicit value
 
         fig = px.imshow(
             volume_pivot,
@@ -455,6 +458,7 @@ class StockDashboard:
     def create_stochastic_chart(self, df: pd.DataFrame) -> go.Figure:
         """Create Stochastic Oscillator chart"""
         df = df.copy()
+        df = df.ffill().bfill()
         df["timestamp_str"] = df["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
 
         fig = go.Figure()
@@ -492,14 +496,13 @@ class StockDashboard:
     def create_price_momentum_chart(self, df: pd.DataFrame) -> go.Figure:
         """Create price momentum chart"""
         df = df.copy()
+        df = df.ffill().bfill()
         df["timestamp_str"] = df["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
 
         # Calculate momentum indicators
         df["ROC"] = df["close"].pct_change(periods=10) * 100
         df["Momentum"] = df["close"] - df["close"].shift(10)
-
-        # Handle any NaN values
-        df = df.fillna(method="ffill").fillna(method="bfill")
+        df = df.ffill().bfill()  # Handle NaN values from calculations
 
         fig = go.Figure()
 
@@ -534,6 +537,7 @@ class StockDashboard:
     def create_atr_chart(self, df: pd.DataFrame) -> go.Figure:
         """Create Average True Range chart"""
         df = df.copy()
+        df = df.ffill().bfill()
         df["timestamp_str"] = df["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
 
         fig = go.Figure()
