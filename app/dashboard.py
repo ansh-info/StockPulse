@@ -1,4 +1,7 @@
+import os
+import sys
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -7,7 +10,13 @@ import plotly.graph_objects as go
 import streamlit as st
 from google.cloud import bigquery, bigquery_storage
 
-from config import GCP_CONFIG, STOCK_CONFIGS
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(current_dir)
+if project_root not in sys.path:
+    sys.path.append(project_root)
+
+
+from src.config.config import GCP_CONFIG, STOCK_CONFIGS
 
 
 class StockDashboard:
