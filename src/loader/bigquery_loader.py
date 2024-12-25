@@ -1,14 +1,27 @@
 import json
 import logging
+import os
+import sys
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, List
 
-from data_preprocessor import DataPreprocessor
 from google.api_core import retry
 from google.cloud import bigquery, pubsub_v1
 
-from config import GCP_CONFIG, STOCK_CONFIGS
+# Add the project root to Python path
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(
+    os.path.dirname(current_dir)
+)  # Go up two levels since we're in src/loader
+if project_root not in sys.path:
+    sys.path.append(project_root)
+    print(f"Added to Python path: {project_root}")
+
+
+from src.config.config import GCP_CONFIG, STOCK_CONFIGS
+from src.preprocessing.data_preprocessor import DataPreprocessor
 
 # Set up logging
 logging.basicConfig(
@@ -169,9 +182,8 @@ class BigQueryLoader:
             try:
                 self.client.get_dataset(dataset_id)
             except Exception:
-                logger.info(f"Dataset not found, recreating {dataset_id}")
+                logger.warning(f"Dataset not found, recreating {dataset_id}")
                 self.ensure_dataset_and_tables()
-                logger.info("Dataset and tables recreated successfully")
 
             errors = self.insert_rows(table_id, rows)
             if not errors:
@@ -181,28 +193,20 @@ class BigQueryLoader:
             else:
                 logger.error(f"Errors during batch insertion: {errors}")
         except Exception as e:
-            if "404" in str(e) and ("not found" in str(e) or "is deleted" in str(e)):
-                logger.info(
-                    "Table or dataset not found, attempting recreation and retry"
-                )
-                try:
-                    # Second attempt after ensuring dataset exists
-                    self.ensure_dataset_and_tables()
-                    logger.info("Successfully recreated tables")
-                    errors = self.insert_rows(table_id, rows)
-                    if not errors:
-                        logger.info(
-                            f"Successfully inserted {len(rows)} rows to {table_id} on retry"
-                        )
-                        self.message_buffer[table_id] = []
-                        self.last_flush_time = time.time()
-                    else:
-                        logger.error(f"Errors during retry batch insertion: {errors}")
-                except Exception as retry_error:
-                    logger.error(f"Error on retry: {retry_error}")
-            else:
-                logger.error(f"Error flushing buffer: {e}")
-                logger.error("This error was not related to missing tables/dataset")
+            logger.error(f"Error flushing buffer: {e}")
+            time.sleep(2)  # Add small delay before retry
+            try:
+                # Second attempt after ensuring dataset exists
+                self.ensure_dataset_and_tables()
+                errors = self.insert_rows(table_id, rows)
+                if not errors:
+                    logger.info(
+                        f"Successfully inserted {len(rows)} rows to {table_id} on retry"
+                    )
+                    self.message_buffer[table_id] = []
+                    self.last_flush_time = time.time()
+            except Exception as retry_error:
+                logger.error(f"Error on retry: {retry_error}")
 
     def callback(self, message):
         try:
