@@ -82,9 +82,7 @@ class StockDashboard:
     def calculate_technical_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """Calculate technical indicators for analysis"""
         # Handle NaN values first
-        df = df.fillna(method="ffill").fillna(
-            method="bfill"
-        )  # More explicit NaN handling
+        df = df.fillna(method="ffill").fillna(method="bfill")
 
         # Ensure numeric types
         numeric_columns = ["close", "high", "low", "volume", "open"]
@@ -144,6 +142,7 @@ class StockDashboard:
     def create_enhanced_candlestick(self, df: pd.DataFrame) -> go.Figure:
         """Create an enhanced candlestick chart with technical indicators"""
         # Ensure data is clean before creating the chart
+        df = df.copy()  # Create a copy to avoid modifying the original
         df = df.fillna(method="ffill").fillna(method="bfill")
         df = (
             df.replace([np.inf, -np.inf], np.nan)
@@ -151,8 +150,8 @@ class StockDashboard:
             .fillna(method="bfill")
         )
 
-        # Convert timestamp to string format that's JSON serializable
-        df["timestamp"] = df["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
+        # Convert timestamp for JSON serialization
+        df["timestamp_str"] = df["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
 
         fig = go.Figure()
 
