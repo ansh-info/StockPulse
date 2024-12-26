@@ -1,0 +1,55 @@
+name: Deploy StockPulse
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  PROJECT_ID: stock-data-pipeline-444011
+  GCP_VM_IP: ${{ secrets.GCP_VM_IP }}
+  GCP_USERNAME: ${{ secrets.GCP_USERNAME }}
+  SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: "3.9"
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v0
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          service_account_key: ${{ secrets.GCP_SA_KEY }}
+          export_default_credentials: true
+
+      - name: Deploy to VM
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.GCP_VM_IP }}
+          username: ${{ secrets.GCP_USERNAME }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            cd ~/stockpulse
+            git pull origin main
+            docker-compose down
+            docker-compose up -d
+
+            # Wait for containers to be ready
+            sleep 20
+
+            # Start the services in the correct order
+            docker-compose exec -T python python src/loader/bigquery_loader.py &
+            sleep 20
+            docker-compose exec -T python python src/ingestion/stocks_pipeline.py &
+            sleep 30
+            docker-compose exec -T python python src/preprocessing/dedup_pipeline.py &
+            sleep 10
+            docker-compose exec -T python streamlit run app/dashboard.py --server.port=8501 --server.address=0.0.0.0

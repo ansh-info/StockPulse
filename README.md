@@ -83,14 +83,14 @@ A robust, production-ready stock market data pipeline built on Google Cloud Plat
 - Cloud Storage
 - Cloud Functions (optional)
 
-## 🚀 Setup and Installation
+## 🚀 Setup and Installation - Docker(Recommended)
 
 ### Prerequisites
 
 - Python 3.9+
-- GCP Account with enabled billing
+- GCP Account with enabled billing #Get Your Service Key from GCP - Place it in the keys/
 - Alpha Vantage API key
-- Docker (optional)
+- Docker
 
 ### Local Development Setup
 
@@ -112,6 +112,8 @@ A robust, production-ready stock market data pipeline built on Google Cloud Plat
 2. **GCP Configuration**
 
    ```bash
+   # GET YOUR KEY - PLACE IT IN THE keys/
+
    # Set up service account
    export GOOGLE_APPLICATION_CREDENTIALS="path/to/key.json"
 
@@ -122,15 +124,19 @@ A robust, production-ready stock market data pipeline built on Google Cloud Plat
 
 3. **Update Configuration**
    ```python
-   # config.py
+   # config.py and .env
    GCP_CONFIG = {
-       "PROJECT_ID": "your-project-id",
-       "BUCKET_NAME": "your-bucket-name",
-       "DATASET_NAME": "stock_market_data"
+       "GCP_PROJECT_ID": "your-project-id",
+       "GCP_BUCKET_NAME": "your-bucket-name",
+       "GCP_TOPIC_NAME": "your-topic-name",
+       "GCP_DATASET_NAME": "your-dataset-name"
+   }
+   ALPHA_VANTAGE_KEY = {
+     "ALPHA_VANTAGE_KEY_1": "your-api-key-1"
    }
    ```
 
-### Docker Deployment
+### Docker Deployment(Recommended)
 
 ```bash
 # Build and run with Docker Compose
@@ -141,6 +147,12 @@ docker-compose ps
 
 # View logs
 docker-compose logs -f
+
+# Interact with gcloudsdk
+docker exec -it gcloudsdk /bin/bash
+
+# Interact with python container
+docker exec -it python /bin/bash
 ```
 
 ![Weekly Distribution](images/weekly_distribution.png)
@@ -159,15 +171,16 @@ docker-compose logs -f
 2. **Run Core Components**
 
    ```bash
-   # Start data loader pipeline
+   # Start data loader pipeline (wait for the tables to be created)
    python bigquery_loader.py
-   # Start data pipeline
+
+   # Start data pipeline (wait for the data to be fetched and published)
    python stocks_pipeline.py
 
-   # Run deduplication process(after the loader    completes)
+   # Run deduplication process (start after the bigquery_loader completes)
    python dedup_pipeline.py
 
-   # Launch dashboard
+   # Launch dashboard (run it from the app/ - to get white background)
    streamlit run dashboard.py
    ```
 
@@ -284,4 +297,3 @@ If you use this project in your research, please cite:
 ```
 
 ---
-
